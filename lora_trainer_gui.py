@@ -20626,13 +20626,29 @@ class LoRATrainerGUI:
                 status.config(text="Add a model search root first.")
             return
 
-        from fizgig.scripts.fetch_models import FAMILIES
+        from fizgig.scripts.fetch_models import FAMILIES, Weight
+        described_keys = {description.key for description in DESCRIBED_FAMILIES.values()}
+        model_families = {
+            name: list(weights)
+            for name, weights in FAMILIES.items()
+            if name not in described_keys
+        }
+        for description in DESCRIBED_FAMILIES.values():
+            model_families[description.key] = [
+                Weight(
+                    model.pref_key, model.repo, model.path, model.size_gb,
+                    model.label, optional=not model.required,
+                    local_name=model.local_name or None,
+                )
+                for model in description.model_files
+                if model.repo and model.path
+            ]
         if family:
-            weights = list(FAMILIES.get(family, ()))
+            weights = model_families.get(family, [])
         else:
             weights = []
             seen = set()
-            for group in FAMILIES.values():
+            for group in model_families.values():
                 for weight in group:
                     if weight.pref_key not in seen:
                         weights.append(weight)

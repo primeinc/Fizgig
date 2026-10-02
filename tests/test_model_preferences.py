@@ -125,6 +125,30 @@ def test_local_search_fills_missing_paths_and_preserves_existing_choices(
     assert json.loads((tmp_path / "prefs.json").read_text())["found"] == str(found_path)
 
 
+def test_qwen_local_search_uses_all_visible_model_paths(preferences, tmp_path, monkeypatch):
+    description = gui.DESCRIBED_FAMILIES["Qwen Image 2.1 (experimental)"]
+    qwen_keys = {model.pref_key for model in description.model_files}
+    preferences.prefs["model_search_roots"] = [str(tmp_path)]
+    preferences.prefs_vars = {key: tk.StringVar(value="") for key in qwen_keys}
+    monkeypatch.setattr(fetch_models, "FAMILIES", {})
+    searched = []
+
+    def search(weight, *_):
+        searched.append(weight.pref_key)
+        return str(tmp_path / f"{weight.pref_key}.safetensors")
+
+    monkeypatch.setattr("fizgig.model_sources.search_model_roots", search)
+    thread = Mock()
+    monkeypatch.setattr(gui.threading, "Thread", thread)
+
+    preferences._start_model_search("qwen_image21")
+    thread.call_args.kwargs["target"]()
+    preferences.master.update()
+
+    assert set(searched) == qwen_keys
+    assert all(preferences.prefs_vars[key].get() for key in qwen_keys)
+
+
 def test_reset_clears_roots(preferences, tmp_path, monkeypatch):
     preferences.prefs["model_search_roots"] = [str(tmp_path)]
     preferences._model_roots_list.insert(tk.END, str(tmp_path))
