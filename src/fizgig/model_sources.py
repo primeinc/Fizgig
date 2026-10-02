@@ -101,7 +101,7 @@ def _find_in_roots(weight, roots, validate, min_bytes):
             if size > weight.gb * 1.2 * 1024**3 or not validate(candidate, min_bytes):
                 continue
             rank = (
-                has_repo,
+                name == "diffusion_pytorch_model.safetensors" and has_repo,
                 has_suffix,
                 name == weight.filename,
             )
