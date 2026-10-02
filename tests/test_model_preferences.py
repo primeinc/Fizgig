@@ -1,5 +1,4 @@
 import json
-import os
 import struct
 import tkinter as tk
 from unittest.mock import Mock
@@ -127,72 +126,59 @@ def test_local_search_fills_missing_paths_and_preserves_existing_choices(
     assert json.loads((tmp_path / "prefs.json").read_text())["found"] == str(found_path)
 
 
-def test_qwen_local_search_fills_only_matching_comfy_weights(preferences, tmp_path, monkeypatch):
-    weights = fetch_models.model_candidates(("qwen_image21",))
-    by_key = {weight.pref_key: weight for weight in weights}
-    assert by_key["qwen21_dit"].path_in_repo == (
-        "diffusion_models/qwen_image_2.1_bf16.safetensors"
-    )
-    assert by_key["qwen21_text_encoder"].path_in_repo == (
-        "text_encoders/qwen3vl_8b_bf16.safetensors"
-    )
-    assert by_key["qwen21_vae"].path_in_repo == (
-        "vae/diffusion_pytorch_model.safetensors"
-    )
+def test_all_canonical_family_candidates_discover_from_filesystem(
+    preferences, tmp_path, monkeypatch
+):
+    family_weights = {
+        family: fetch_models.model_candidates((family,))
+        for family in fetch_models.FAMILIES
+    }
+    weights = fetch_models.model_candidates()
+    assert {weight.pref_key for group in family_weights.values() for weight in group} == {
+        weight.pref_key for weight in weights
+    }
+    assert any(weight.optional for weight in weights)
 
-    root = tmp_path / "ComfyUI" / "models"
-    root.mkdir(parents=True)
-    checked_minimums = {}
-    validate_header = fetch_models._valid_safetensors
+    root = tmp_path / "model-root"
+    explicit_weight = next(
+        weight for weight in family_weights["klein"] if weight.pref_key == "base_dit"
+    )
+    explicit = tmp_path / "user-selected-community-model.safetensors"
+    explicit.write_bytes(b"user selection")
+    preferences.prefs["model_search_roots"] = [str(root)]
+    preferences.prefs_vars = {
+        weight.pref_key: tk.StringVar(
+            value=str(explicit) if weight.pref_key == explicit_weight.pref_key else ""
+        )
+        for weight in weights
+    }
 
-    def write_weight(path):
+    for weight in weights:
+        path = root / weight.path_in_repo
         path.parent.mkdir(parents=True, exist_ok=True)
         header = b"{}"
         with path.open("wb") as stream:
             stream.write(struct.pack("<Q", len(header)))
             stream.write(header)
-            stream.truncate(1024)
+            stream.truncate(max(1024, int(weight.gb * 0.8 * 1024**3)))
 
-    def validate_fixture(path, minimum):
-        checked_minimums[os.path.basename(path)] = minimum
-        return validate_header(path, 0)
-
-    monkeypatch.setattr(fetch_models, "_valid_safetensors", validate_fixture)
-
-    for key in ("qwen21_dit", "qwen21_text_encoder"):
-        weight = by_key[key]
-        write_weight(root / weight.path_in_repo)
-    comfy_vae = root / "vae" / "qwen_image_2.1_vae_bf16.safetensors"
-    write_weight(comfy_vae)
-    wrong_generic = root / "vae" / "other" / "diffusion_pytorch_model.safetensors"
-    write_weight(wrong_generic)
-
-    preferences.prefs["model_search_roots"] = [str(tmp_path)]
-    preferences.prefs_vars = {
-        key: tk.StringVar(value="") for key in by_key
-    }
     thread = Mock()
     monkeypatch.setattr(gui.threading, "Thread", thread)
 
-    preferences._start_model_search("qwen_image21")
-    thread.call_args.kwargs["target"]()
-    preferences.master.update()
+    for family, candidates in family_weights.items():
+        preferences._start_model_search(family)
+        thread.call_args.kwargs["target"]()
+        preferences.master.update()
+        assert all(preferences.prefs_vars[weight.pref_key].get() for weight in candidates)
 
     expected = {
-        "qwen21_dit": str((root / by_key["qwen21_dit"].path_in_repo).absolute()),
-        "qwen21_text_encoder": str(
-            (root / by_key["qwen21_text_encoder"].path_in_repo).absolute()
-        ),
+        weight.pref_key: (
+            str(explicit) if weight.pref_key == explicit_weight.pref_key
+            else str((root / weight.path_in_repo).absolute())
+        )
+        for weight in weights
     }
-    assert {
-        key: var.get() for key, var in preferences.prefs_vars.items() if var.get()
-    } == expected
-    assert checked_minimums["qwen_image_2.1_bf16.safetensors"] == int(
-        by_key["qwen21_dit"].gb * 0.8 * 1024**3
-    )
-    assert checked_minimums["qwen3vl_8b_bf16.safetensors"] == int(
-        by_key["qwen21_text_encoder"].gb * 0.8 * 1024**3
-    )
+    assert {key: var.get() for key, var in preferences.prefs_vars.items()} == expected
 
 
 def test_reset_clears_roots(preferences, tmp_path, monkeypatch):
