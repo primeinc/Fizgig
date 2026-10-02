@@ -1,0 +1,76 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - requirements.txt
+      - uv_install_deps.py
+
+jobs:
+  # GitHub Copilot cloud agent requires this exact job id.
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # Fizgig's CUDA PyTorch environment is large. Its existing Docker workflow has to
+      # reclaim space on the standard hosted runner for the same reason. Keep the Python
+      # toolcache intact because setup-python and the Copilot session use it.
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet                       /usr/local/lib/android                       /opt/ghc                       /usr/local/share/boost
+          df -h /
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          # Fizgig supports 3.10-3.13. Use the conservative middle of that range for
+          # agent work so native/wheel dependencies have the broadest support.
+          python-version: "3.12"
+
+      - name: Install Linux development prerequisites
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             build-essential             python3-tk             libgl1             libglib2.0-0             libsm6             libxext6             libxrender1             xvfb             xauth             fonts-dejavu-core             fonts-liberation
+          sudo rm -rf /var/lib/apt/lists/*
+
+      - name: Install Fizgig Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip uv
+
+          # Reuse Fizgig's canonical installer. In particular, this deliberately scopes
+          # the PyTorch CUDA index to torch/torchvision instead of exposing the rest of
+          # requirements.txt to that mirror.
+          python uv_install_deps.py             requirements.txt             "$(python -c 'import sys; print(sys.prefix)')"
+
+      - name: Expose repository modules to the agent
+        shell: bash
+        run: |
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Verify development environment
+        shell: bash
+        run: |
+          python - <<'PY'
+          import cv2
+          import huggingface_hub
+          import safetensors
+          import tkinter
+          import torch
+
+          print("Python environment imports successfully")
+          print(f"PyTorch {torch.__version__}")
+          print(f"CUDA available on hosted runner: {torch.cuda.is_available()}")
+          PY
+
+          python -m compileall -q src
