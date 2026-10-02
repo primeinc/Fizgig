@@ -1,6 +1,7 @@
 import json
 import struct
 import tkinter as tk
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -153,8 +154,14 @@ def test_all_canonical_family_candidates_discover_from_filesystem(
         for weight in weights
     }
 
-    for weight in weights:
+    def fixture_path(weight):
         path = root / weight.path_in_repo
+        if path.name == "diffusion_pytorch_model.safetensors":
+            path = root / Path(*weight.repo.split("/")) / weight.path_in_repo
+        return path
+
+    for weight in weights:
+        path = fixture_path(weight)
         path.parent.mkdir(parents=True, exist_ok=True)
         header = b"{}"
         with path.open("wb") as stream:
@@ -174,7 +181,7 @@ def test_all_canonical_family_candidates_discover_from_filesystem(
     expected = {
         weight.pref_key: (
             str(explicit) if weight.pref_key == explicit_weight.pref_key
-            else str((root / weight.path_in_repo).absolute())
+            else str(fixture_path(weight).absolute())
         )
         for weight in weights
     }

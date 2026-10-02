@@ -289,12 +289,14 @@ def test_ambiguous_weight_is_not_downloaded(tmp_path, weight):
     assert any("[ambiguous]" in line for line in logs)
 
 
-def test_generic_diffusers_filename_requires_exact_repo_suffix(tmp_path):
+def test_generic_diffusers_filename_from_another_repo_is_rejected(tmp_path):
     weight = fetch_models.Weight(
-        "generic", "owner/repo", "vae/diffusion_pytorch_model.safetensors",
+        "generic", "Qwen/Qwen-Image-2.1", "vae/diffusion_pytorch_model.safetensors",
         1024 / 1024**3, "",
     )
-    make_weight(tmp_path / "library" / "wrong" / weight.filename)
+    make_weight(
+        tmp_path / "library" / "some-other-diffusers-repo" / "vae" / weight.filename
+    )
 
     result = model_sources.search_model_roots(
         weight, [str(tmp_path / "library")], fetch_models._valid_safetensors, 819
@@ -303,12 +305,14 @@ def test_generic_diffusers_filename_requires_exact_repo_suffix(tmp_path):
     assert result is None
 
 
-def test_generic_diffusers_filename_matches_exact_repo_suffix(tmp_path):
+def test_generic_diffusers_filename_requires_repository_identity(tmp_path):
     weight = fetch_models.Weight(
-        "generic", "owner/repo", "vae/diffusion_pytorch_model.safetensors",
+        "generic", "Qwen/Qwen-Image-2.1", "vae/diffusion_pytorch_model.safetensors",
         1024 / 1024**3, "",
     )
-    expected = make_weight(tmp_path / "library" / weight.path_in_repo)
+    expected = make_weight(
+        tmp_path / "library" / "Qwen" / "Qwen-Image-2.1" / weight.path_in_repo
+    )
 
     result = model_sources.search_model_roots(
         weight, [str(tmp_path / "library")], fetch_models._valid_safetensors, 819
