@@ -8,6 +8,8 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.ruff_cache/
 
 # Local config (created on first run)
 prefs.json
@@ -92,7 +94,9 @@ python312/
 
 
 # Internal-only: debugging test harnesses + template setup notes (local, never public)
-tests/
+tests/*
+!tests/test_model_discovery.py
+!tests/test_model_preferences.py
 docs/RUNPOD_TEMPLATE.md
 
 # Local-only deploy/sync helpers (never commit)
