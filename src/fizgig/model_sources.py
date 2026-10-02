@@ -29,6 +29,8 @@ TREE_STORES = (
     ),
 )
 
+AMBIGUOUS = object()
+
 
 def effective_roots(selected):
     """Narrow recognized roots without changing the user's persisted selection."""
@@ -84,6 +86,8 @@ def _find_in_roots(weight, roots, validate, min_bytes):
             has_suffix = candidate.parts[-len(suffix) :] == suffix
             if name != weight.filename and not has_suffix:
                 continue
+            if name == "diffusion_pytorch_model.safetensors" and not has_suffix:
+                continue
             try:
                 size = candidate.stat().st_size
             except OSError:
@@ -100,7 +104,7 @@ def _find_in_roots(weight, roots, validate, min_bytes):
         return None
     best = matches[max(matches)]
     if len(best) != 1:
-        return None
+        return AMBIGUOUS
     return str(next(iter(best.values())).absolute())
 
 
@@ -114,6 +118,8 @@ def search_model_roots(weight, roots, validate, min_bytes):
         found = _find_in_roots(
             weight, effective_roots(selected), validate, min_bytes
         )
+        if found is AMBIGUOUS:
+            return AMBIGUOUS
         if found:
             return found
     return None
@@ -122,6 +128,8 @@ def search_model_roots(weight, roots, validate, min_bytes):
 def resolve_weight(weight, roots, models_dir, validate, min_bytes):
     """User trees, exact HF cache, known stores, then Fizgig's download directory."""
     found = search_model_roots(weight, roots, validate, min_bytes)
+    if found is AMBIGUOUS:
+        return AMBIGUOUS
     if found:
         return found
     try:
@@ -132,6 +140,8 @@ def resolve_weight(weight, roots, models_dir, validate, min_bytes):
         return os.path.abspath(cached)
     for root in (*automatic_roots(), Path(models_dir).absolute()):
         found = _find_in_roots(weight, (root,), validate, min_bytes)
+        if found is AMBIGUOUS:
+            return AMBIGUOUS
         if found:
             return found
     return None

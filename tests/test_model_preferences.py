@@ -1,4 +1,6 @@
 import json
+import os
+import struct
 import tkinter as tk
 from unittest.mock import Mock
 
@@ -125,19 +127,50 @@ def test_local_search_fills_missing_paths_and_preserves_existing_choices(
     assert json.loads((tmp_path / "prefs.json").read_text())["found"] == str(found_path)
 
 
-def test_qwen_local_search_uses_all_visible_model_paths(preferences, tmp_path, monkeypatch):
-    description = gui.DESCRIBED_FAMILIES["Qwen Image 2.1 (experimental)"]
-    qwen_keys = {model.pref_key for model in description.model_files}
+def test_qwen_local_search_fills_only_matching_comfy_weights(preferences, tmp_path, monkeypatch):
+    weights = fetch_models.model_candidates(("qwen_image21",))
+    by_key = {weight.pref_key: weight for weight in weights}
+    assert by_key["qwen21_dit"].path_in_repo == (
+        "diffusion_models/qwen_image_2.1_bf16.safetensors"
+    )
+    assert by_key["qwen21_text_encoder"].path_in_repo == (
+        "text_encoders/qwen3vl_8b_bf16.safetensors"
+    )
+    assert by_key["qwen21_vae"].path_in_repo == (
+        "vae/diffusion_pytorch_model.safetensors"
+    )
+
+    root = tmp_path / "ComfyUI" / "models"
+    root.mkdir(parents=True)
+    checked_minimums = {}
+    validate_header = fetch_models._valid_safetensors
+
+    def write_weight(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        header = b"{}"
+        with path.open("wb") as stream:
+            stream.write(struct.pack("<Q", len(header)))
+            stream.write(header)
+            stream.truncate(1024)
+
+    def validate_fixture(path, minimum):
+        checked_minimums[os.path.basename(path)] = minimum
+        return validate_header(path, 0)
+
+    monkeypatch.setattr(fetch_models, "_valid_safetensors", validate_fixture)
+
+    for key in ("qwen21_dit", "qwen21_text_encoder"):
+        weight = by_key[key]
+        write_weight(root / weight.path_in_repo)
+    comfy_vae = root / "vae" / "qwen_image_2.1_vae_bf16.safetensors"
+    write_weight(comfy_vae)
+    wrong_generic = root / "vae" / "other" / "diffusion_pytorch_model.safetensors"
+    write_weight(wrong_generic)
+
     preferences.prefs["model_search_roots"] = [str(tmp_path)]
-    preferences.prefs_vars = {key: tk.StringVar(value="") for key in qwen_keys}
-    monkeypatch.setattr(fetch_models, "FAMILIES", {})
-    searched = []
-
-    def search(weight, *_):
-        searched.append(weight.pref_key)
-        return str(tmp_path / f"{weight.pref_key}.safetensors")
-
-    monkeypatch.setattr("fizgig.model_sources.search_model_roots", search)
+    preferences.prefs_vars = {
+        key: tk.StringVar(value="") for key in by_key
+    }
     thread = Mock()
     monkeypatch.setattr(gui.threading, "Thread", thread)
 
@@ -145,8 +178,21 @@ def test_qwen_local_search_uses_all_visible_model_paths(preferences, tmp_path, m
     thread.call_args.kwargs["target"]()
     preferences.master.update()
 
-    assert set(searched) == qwen_keys
-    assert all(preferences.prefs_vars[key].get() for key in qwen_keys)
+    expected = {
+        "qwen21_dit": str((root / by_key["qwen21_dit"].path_in_repo).absolute()),
+        "qwen21_text_encoder": str(
+            (root / by_key["qwen21_text_encoder"].path_in_repo).absolute()
+        ),
+    }
+    assert {
+        key: var.get() for key, var in preferences.prefs_vars.items() if var.get()
+    } == expected
+    assert checked_minimums["qwen_image_2.1_bf16.safetensors"] == int(
+        by_key["qwen21_dit"].gb * 0.8 * 1024**3
+    )
+    assert checked_minimums["qwen3vl_8b_bf16.safetensors"] == int(
+        by_key["qwen21_text_encoder"].gb * 0.8 * 1024**3
+    )
 
 
 def test_reset_clears_roots(preferences, tmp_path, monkeypatch):

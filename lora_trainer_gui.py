@@ -20626,33 +20626,11 @@ class LoRATrainerGUI:
                 status.config(text="Add a model search root first.")
             return
 
-        from fizgig.scripts.fetch_models import FAMILIES, Weight
-        described_keys = {description.key for description in DESCRIBED_FAMILIES.values()}
-        model_families = {
-            name: list(weights)
-            for name, weights in FAMILIES.items()
-            if name not in described_keys
-        }
-        for description in DESCRIBED_FAMILIES.values():
-            model_families[description.key] = [
-                Weight(
-                    model.pref_key, model.repo, model.path, model.size_gb,
-                    model.label, optional=not model.required,
-                    local_name=model.local_name or None,
-                )
-                for model in description.model_files
-                if model.repo and model.path
-            ]
+        from fizgig.scripts.fetch_models import model_candidates
         if family:
-            weights = model_families.get(family, [])
+            weights = model_candidates((family,))
         else:
-            weights = []
-            seen = set()
-            for group in model_families.values():
-                for weight in group:
-                    if weight.pref_key not in seen:
-                        weights.append(weight)
-                        seen.add(weight.pref_key)
+            weights = model_candidates()
         weights = [weight for weight in weights if weight.pref_key in self.prefs_vars]
         if not weights:
             if status:
@@ -20683,7 +20661,7 @@ class LoRATrainerGUI:
                         weight, roots, _valid_safetensors,
                         int(weight.gb * 0.8 * 1024 ** 3),
                     )
-                    if path:
+                    if path is not None and path is not model_sources.AMBIGUOUS:
                         found[weight.pref_key] = path
                 self.master.after(
                     0, lambda: self._finish_model_search(family, weights, found, kept)

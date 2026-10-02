@@ -98,6 +98,31 @@ def test_arbitrary_nested_root(tmp_path, weight):
     assert result == str(expected)
 
 
+def test_fetch_preserves_search_roots_changed_while_running(tmp_path, monkeypatch):
+    prefs_file = tmp_path / "prefs.json"
+    fetch_models._save_prefs(
+        str(prefs_file), {"model_search_roots": [str(tmp_path / "before")]}
+    )
+    weight = fetch_models.Weight("test_weight", "owner/repo", "model.safetensors", 1, "")
+    monkeypatch.setattr(fetch_models, "FAMILIES", {"test": [weight]})
+
+    def resolve_during_fetch(model, models_dir, prefs, **_kwargs):
+        prefs[model.pref_key] = str(tmp_path / model.filename)
+        fetch_models._save_prefs(
+            str(prefs_file),
+            {"model_search_roots": [str(tmp_path / "after")]},
+        )
+        return True
+
+    monkeypatch.setattr(fetch_models, "fetch_weight", resolve_during_fetch)
+
+    assert fetch_models.fetch(["test"], repo_dir=str(tmp_path), log=lambda _: None)
+
+    prefs = fetch_models._load_prefs(str(prefs_file))
+    assert prefs["model_search_roots"] == [str(tmp_path / "after")]
+    assert prefs["test_weight"] == str(tmp_path / weight.filename)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_ordered_roots_win_over_cache_and_download_directory(
     tmp_path, weight, monkeypatch, reverse
@@ -230,7 +255,66 @@ def test_ambiguous_candidates_remain_unresolved(tmp_path, weight):
 
     result = discover(weight, [str(root)], tmp_path / "downloads")
 
+    assert result is model_sources.AMBIGUOUS
+
+
+def test_ambiguous_higher_priority_root_stops_search(tmp_path, weight, monkeypatch):
+    first = tmp_path / "first"
+    for directory in ("a", "b"):
+        make_weight(first / directory / weight.filename)
+    lower = make_weight(tmp_path / "second" / weight.filename)
+    cached = make_weight(tmp_path / "cache" / weight.filename)
+    monkeypatch.setattr(model_sources, "try_to_load_from_cache", lambda *_: str(cached))
+
+    result = discover(
+        weight, [str(first), str(lower.parent)], tmp_path / "downloads"
+    )
+
+    assert result is model_sources.AMBIGUOUS
+
+
+def test_ambiguous_weight_is_not_downloaded(tmp_path, weight):
+    root = tmp_path / "library"
+    for directory in ("a", "b"):
+        make_weight(root / directory / weight.filename)
+    prefs = {"model_search_roots": [str(root)]}
+    logs = []
+
+    result = fetch_models.fetch_weight(
+        weight, str(tmp_path / "downloads"), prefs, log=logs.append
+    )
+
+    assert result is False
+    assert weight.pref_key not in prefs
+    assert any("[ambiguous]" in line for line in logs)
+
+
+def test_generic_diffusers_filename_requires_exact_repo_suffix(tmp_path):
+    weight = fetch_models.Weight(
+        "generic", "owner/repo", "vae/diffusion_pytorch_model.safetensors",
+        1024 / 1024**3, "",
+    )
+    make_weight(tmp_path / "library" / "wrong" / weight.filename)
+
+    result = model_sources.search_model_roots(
+        weight, [str(tmp_path / "library")], fetch_models._valid_safetensors, 819
+    )
+
     assert result is None
+
+
+def test_generic_diffusers_filename_matches_exact_repo_suffix(tmp_path):
+    weight = fetch_models.Weight(
+        "generic", "owner/repo", "vae/diffusion_pytorch_model.safetensors",
+        1024 / 1024**3, "",
+    )
+    expected = make_weight(tmp_path / "library" / weight.path_in_repo)
+
+    result = model_sources.search_model_roots(
+        weight, [str(tmp_path / "library")], fetch_models._valid_safetensors, 819
+    )
+
+    assert result == str(expected)
 
 
 def test_wrapper_subtrees_are_compared_together(tmp_path, weight):
@@ -239,7 +323,7 @@ def test_wrapper_subtrees_are_compared_together(tmp_path, weight):
 
     result = discover(weight, [str(tmp_path)], tmp_path / "downloads")
 
-    assert result is None
+    assert result is model_sources.AMBIGUOUS
 
 
 def test_original_filename_requires_repo_suffix_when_local_name_differs(
