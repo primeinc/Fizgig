@@ -104,17 +104,26 @@ def _find_in_roots(weight, roots, validate, min_bytes):
     return str(next(iter(best.values())).absolute())
 
 
+def search_model_roots(weight, roots, validate, min_bytes):
+    """Search only the ordered roots the user selected, without cache or download fallbacks."""
+    if not isinstance(roots, (list, tuple)):
+        return None
+    for selected in roots:
+        if not isinstance(selected, str) or not selected.strip():
+            continue
+        found = _find_in_roots(
+            weight, effective_roots(selected), validate, min_bytes
+        )
+        if found:
+            return found
+    return None
+
+
 def resolve_weight(weight, roots, models_dir, validate, min_bytes):
     """User trees, exact HF cache, known stores, then Fizgig's download directory."""
-    if isinstance(roots, (list, tuple)):
-        for selected in roots:
-            if not isinstance(selected, str) or not selected.strip():
-                continue
-            found = _find_in_roots(
-                weight, effective_roots(selected), validate, min_bytes
-            )
-            if found:
-                return found
+    found = search_model_roots(weight, roots, validate, min_bytes)
+    if found:
+        return found
     try:
         cached = try_to_load_from_cache(weight.repo, weight.path_in_repo)
     except (OSError, ValueError):

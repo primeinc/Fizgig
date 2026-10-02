@@ -37,6 +37,19 @@ def test_gui_loads_and_persists_root_lists(preferences, tmp_path, count):
     assert loaded["model_search_roots"] == roots
 
 
+def test_global_and_family_search_controls_are_available(preferences):
+    assert preferences._model_search_all_btn.cget("text") == "🔎 Search all models"
+    for key in gui.LoRATrainerGUI._PREFS_FAMILY_KEYS["klein"]:
+        preferences.prefs_vars[key] = tk.StringVar(value="")
+
+    preferences._prefs_family_section(preferences.master, "klein", "Klein", "Models")
+
+    assert any(
+        button.cget("text") == "🔎 Search locally"
+        for button in preferences._model_search_buttons
+    )
+
+
 def test_add_root_preserves_application_selection(preferences, tmp_path, monkeypatch):
     selected = tmp_path / "ComfyUI"
     (selected / "models").mkdir(parents=True)
@@ -80,6 +93,36 @@ def test_cancel_add_does_not_change_roots(preferences, monkeypatch):
 
     assert preferences.prefs["model_search_roots"] == []
     assert preferences._model_roots_list.size() == 0
+
+
+def test_local_search_fills_missing_paths_and_preserves_existing_choices(
+    preferences, tmp_path, monkeypatch
+):
+    found_weight = fetch_models.Weight("found", "owner/repo", "model.safetensors", 1, "")
+    chosen_weight = fetch_models.Weight("chosen", "owner/repo", "other.safetensors", 1, "")
+    found_path = tmp_path / "found.safetensors"
+    chosen_path = tmp_path / "my-choice.safetensors"
+    chosen_path.touch()
+    preferences.prefs["model_search_roots"] = [str(tmp_path)]
+    preferences.prefs_vars = {
+        "found": tk.StringVar(value=""),
+        "chosen": tk.StringVar(value=str(chosen_path)),
+    }
+    monkeypatch.setattr(fetch_models, "FAMILIES", {"demo": [found_weight, chosen_weight]})
+    monkeypatch.setattr(
+        "fizgig.model_sources.search_model_roots",
+        lambda weight, *_: str(found_path) if weight.pref_key == "found" else None,
+    )
+    thread = Mock()
+    monkeypatch.setattr(gui.threading, "Thread", thread)
+
+    preferences._start_model_search("demo")
+    thread.call_args.kwargs["target"]()
+    preferences.master.update()
+
+    assert preferences.prefs_vars["found"].get() == str(found_path)
+    assert preferences.prefs_vars["chosen"].get() == str(chosen_path)
+    assert json.loads((tmp_path / "prefs.json").read_text())["found"] == str(found_path)
 
 
 def test_reset_clears_roots(preferences, tmp_path, monkeypatch):

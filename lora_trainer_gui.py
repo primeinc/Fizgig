@@ -19552,6 +19552,21 @@ class LoRATrainerGUI:
                  fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT
                  ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(4, 10))
+        search_bar = tk.Frame(content, bg=COLORS["bg_surface"])
+        search_bar.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+        search_btn = ttk.Button(
+            search_bar, text="🔎 Search locally",
+            command=lambda f=family: self._start_model_search(f),
+        )
+        search_btn.pack(side=tk.LEFT)
+        self._model_search_buttons = getattr(self, "_model_search_buttons", [])
+        self._model_search_buttons.append(search_btn)
+        search_status = tk.Label(
+            search_bar, text="", font=(FONT_FAMILY, 9),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        search_status.pack(side=tk.LEFT, padx=(10, 0))
+        setattr(self, f"_model_search_status_{family}", search_status)
 
         def _refresh_badge(*_a):
             n = _missing()
@@ -19567,7 +19582,7 @@ class LoRATrainerGUI:
         _refresh_badge()
         for k in keys:
             self.prefs_vars[k].trace_add("write", _refresh_badge)
-        return content, 1
+        return content, 2
 
     def _generic_prefs_section(self, parent, d):
         """Standard layer: a family's model-path section built from its description (rows, Download links,
@@ -20565,8 +20580,9 @@ class LoRATrainerGUI:
         card = tk.LabelFrame(parent, text="Model search roots", bg=COLORS["bg_surface"],
                              fg=COLORS["text_primary"], padx=12, pady=10)
         card.pack(fill=tk.X, pady=(0, 12))
-        tk.Label(card, text="Searched in order before downloading. Select a model library or application "
-                 "folder (ComfyUI, Forge, SwarmUI, Fooocus, Stability Matrix).\n"
+        tk.Label(card, text="Search all models or search locally in a family section to scan these roots only — "
+                 "this never downloads. Select a model library or application folder "
+                 "(ComfyUI, Forge, SwarmUI, Fooocus, Stability Matrix).\n"
                  "Existing per-model paths stay unchanged; Browse below remains an explicit override.",
                  bg=COLORS["bg_surface"], fg=COLORS["text_explain"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W)
@@ -20583,6 +20599,121 @@ class LoRATrainerGUI:
         for label, action in (("Add…", "add"), ("Remove", "remove"), ("Up", "up"), ("Down", "down")):
             ttk.Button(bar, text=label, command=lambda a=action: self._edit_model_search_roots(a)).pack(
                 side=tk.LEFT, padx=(0, 6))
+        self._model_search_buttons = getattr(self, "_model_search_buttons", [])
+        self._model_search_all_btn = ttk.Button(
+            bar, text="🔎 Search all models",
+            command=lambda: self._start_model_search(),
+        )
+        self._model_search_all_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self._model_search_buttons.append(self._model_search_all_btn)
+        self._model_search_status = tk.Label(
+            card, text="", font=(FONT_FAMILY, 9),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        self._model_search_status.pack(anchor=tk.W, pady=(6, 0))
+
+    def _start_model_search(self, family=None):
+        """Search configured roots in the background and fill only unset model paths."""
+        if getattr(self, "_model_search_running", False):
+            return
+        roots = self.prefs.get("model_search_roots", [])
+        roots = [root for root in roots if isinstance(root, str) and root.strip()] \
+            if isinstance(roots, list) else []
+        status = (getattr(self, f"_model_search_status_{family}", None)
+                  if family else getattr(self, "_model_search_status", None))
+        if not roots:
+            if status:
+                status.config(text="Add a model search root first.")
+            return
+
+        from fizgig.scripts.fetch_models import FAMILIES
+        if family:
+            weights = list(FAMILIES.get(family, ()))
+        else:
+            weights = []
+            seen = set()
+            for group in FAMILIES.values():
+                for weight in group:
+                    if weight.pref_key not in seen:
+                        weights.append(weight)
+                        seen.add(weight.pref_key)
+        weights = [weight for weight in weights if weight.pref_key in self.prefs_vars]
+        if not weights:
+            if status:
+                status.config(text="No model paths are available to search.")
+            return
+
+        prefs = dict(self.prefs)
+        prefs.update({key: var.get() for key, var in self.prefs_vars.items()})
+        self._model_search_running = True
+        for button in getattr(self, "_model_search_buttons", ()):
+            button.config(state="disabled")
+        if status:
+            status.config(text="Searching model roots…")
+
+        def worker():
+            from fizgig import model_sources
+            from fizgig.scripts.fetch_models import _valid_safetensors
+
+            found, kept = {}, set()
+            try:
+                for weight in weights:
+                    current = str(prefs.get(weight.pref_key) or "").strip()
+                    if current and os.path.isfile(current):
+                        found[weight.pref_key] = current
+                        kept.add(weight.pref_key)
+                        continue
+                    path = model_sources.search_model_roots(
+                        weight, roots, _valid_safetensors,
+                        int(weight.gb * 0.8 * 1024 ** 3),
+                    )
+                    if path:
+                        found[weight.pref_key] = path
+                self.master.after(
+                    0, lambda: self._finish_model_search(family, weights, found, kept)
+                )
+            except (OSError, ValueError) as exc:
+                self.master.after(
+                    0, lambda error=exc: self._finish_model_search(
+                        family, weights, found, kept, error
+                    )
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_model_search(self, family, weights, found, kept, error=None):
+        """Apply scan results on the Tk thread and persist resolved paths."""
+        self._model_search_running = False
+        for button in getattr(self, "_model_search_buttons", ()):
+            try:
+                button.config(state="normal")
+            except tk.TclError:
+                pass
+        if error:
+            result = f"Search failed: {type(error).__name__}: {error}"
+        else:
+            updated = 0
+            for key, path in found.items():
+                if key in kept:
+                    continue
+                var = self.prefs_vars.get(key)
+                if var is not None:
+                    var.set(path)
+                    self.prefs[key] = path
+                    updated += 1
+            if updated:
+                save_prefs(self.prefs)
+            missing = len(weights) - len(found)
+            result = (
+                f"Search complete: {updated} found, {len(kept)} already set, "
+                f"{missing} not found."
+            )
+        statuses = [getattr(self, "_model_search_status", None)]
+        if family:
+            statuses.append(getattr(self, f"_model_search_status_{family}", None))
+        for status in statuses:
+            if status:
+                status.config(text=result)
 
     def _edit_model_search_roots(self, action):
         roots = list(self._model_roots_list.get(0, tk.END))

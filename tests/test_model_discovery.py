@@ -64,6 +64,16 @@ def discover(weight, roots, models_dir):
     )
 
 
+def test_manual_search_uses_only_selected_roots(tmp_path, weight):
+    make_weight(tmp_path / "downloads" / weight.filename)
+
+    result = model_sources.search_model_roots(
+        weight, [], fetch_models._valid_safetensors, 819
+    )
+
+    assert result is None
+
+
 @pytest.mark.parametrize("count", [0, 1, 3])
 def test_roots_persist_through_fetch(tmp_path, monkeypatch, count):
     roots = [str(tmp_path / f"root-{index}") for index in range(count)]
