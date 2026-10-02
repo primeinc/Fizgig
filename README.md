@@ -105,6 +105,21 @@ cd Fizgig
 
 Model files download from the **Preferences** tab: one **Download models for me** button per model.
 
+Already have the weights? Add their folders once under **Preferences → Model search roots**.
+You can add, remove, or reorder roots; Fizgig searches them recursively in that order before
+downloading each weight. Selecting a ComfyUI application folder (including a portable wrapper
+containing `ComfyUI/models`) is enough. Stability Matrix libraries, A1111/Forge, SwarmUI, and
+Fooocus roots also narrow to their conventional model subtree when recognized. Arbitrary
+folders and already-selected model directories work as-is; your selected roots are not rewritten.
+
+Existing per-model paths always win, including community/fine-tuned files. Otherwise the order
+is user roots, exact Hugging Face cache lookup (honoring its cache environment settings),
+Stability Matrix's documented library location pointer, then Fizgig's own `models` directory.
+Discovery uses known filenames/repo paths, plausible sizes, and the existing safetensors header
+check, not whole-file hashes. Equally strong competing matches remain unresolved. Only missing
+weights download; per-model **Browse** remains available for overrides or ambiguous files.
+Helper models loaded by name keep their existing cache/download behavior.
+
 ### No GPU? Rent one
 
 The whole app runs in a browser tab on RunPod, with a file manager, one-click model downloads and an optional auto-stop when training finishes. **[⚡ Deploy on RunPod →](https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep)** · [Guide](docker/README.md)

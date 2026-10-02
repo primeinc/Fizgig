@@ -1364,6 +1364,7 @@ def _serialize_pref_path(value: str) -> str:
 
 
 DEFAULT_PREFS = {
+    "model_search_roots": [],
     # Model paths (absolute — point to external model downloads).
     # Blank on first launch; user fills these in via the Preferences tab. Each
     # row has a "Download" link that opens the correct HuggingFace repo.
@@ -1852,6 +1853,8 @@ class LoRATrainerGUI:
         self._cuda_device_applied = _apply_cuda_device_pref(self.prefs)
         self.prefs_vars = {}
         for key, default in DEFAULT_PREFS.items():
+            if key == "model_search_roots":
+                continue
             var = tk.StringVar(value=self.prefs.get(key, default))
             var.trace_add("write", lambda *a, k=key: self._save_pref(k))
             self.prefs_vars[key] = var
@@ -19610,6 +19613,8 @@ class LoRATrainerGUI:
             "and persist to prefs.json.",
         )
 
+        self._create_model_search_roots(outer)
+
         # The three model-family sections are collapsible, and smart about it: a family with a
         # required path still blank starts open, a configured one starts closed. Click the
         # header to toggle; the badge says which state you're in without opening anything.
@@ -20296,7 +20301,7 @@ class LoRATrainerGUI:
         self.master.wait_window(dlg)
         return result["token"]
 
-    def _start_fetch_models(self, family):
+    def _start_fetch_models(self, family, _needs_token=None):
         """Run the fetcher in a worker thread, streaming progress into the status label."""
         if getattr(self, "_fetch_running", False):
             messagebox.showinfo("Already downloading", "A model download is already running.")
@@ -20308,7 +20313,26 @@ class LoRATrainerGUI:
             # An HF_TOKEN already in the environment (the container's documented env var for
             # exactly this) satisfies the gate with no prompt — only ask when there isn't one.
             token = os.environ.get("HF_TOKEN", "").strip()
-            if not token:
+            if not token and _needs_token is None:
+                # Resolve locally on a worker before asking for credentials. A cached or
+                # user-root Klein weight needs no licence request or network access.
+                self._fetch_running = True
+                prefs = dict(self.prefs)
+
+                def resume(needs_token):
+                    self._fetch_running = False
+                    self._start_fetch_models(family, _needs_token=needs_token)
+
+                def probe():
+                    from fizgig.scripts.fetch_models import FAMILIES, find_weight
+                    models_dir = os.path.join(FIZGIG_DIR, "models")
+                    needs_token = any(w.gated and not find_weight(w, models_dir, prefs)
+                                      for w in FAMILIES[family])
+                    self.master.after(0, lambda: resume(needs_token))
+
+                threading.Thread(target=probe, daemon=True).start()
+                return
+            if not token and _needs_token:
                 token = self._ask_hf_token()
                 if not token:
                     return
@@ -20537,6 +20561,58 @@ class LoRATrainerGUI:
         row += 1
         return row
 
+    def _create_model_search_roots(self, parent):
+        card = tk.LabelFrame(parent, text="Model search roots", bg=COLORS["bg_surface"],
+                             fg=COLORS["text_primary"], padx=12, pady=10)
+        card.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(card, text="Searched in order before downloading. Select a model library or application "
+                 "folder (ComfyUI, Forge, SwarmUI, Fooocus, Stability Matrix).\n"
+                 "Existing per-model paths stay unchanged; Browse below remains an explicit override.",
+                 bg=COLORS["bg_surface"], fg=COLORS["text_explain"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W)
+        self._model_roots_list = tk.Listbox(card, height=4, exportselection=False,
+                                          bg=COLORS["bg_deep"], fg=COLORS["text_primary"])
+        self._model_roots_list.pack(fill=tk.X, pady=8)
+        roots = self.prefs.get("model_search_roots", [])
+        if isinstance(roots, list):
+            for root in roots:
+                if isinstance(root, str):
+                    self._model_roots_list.insert(tk.END, root)
+        bar = tk.Frame(card, bg=COLORS["bg_surface"])
+        bar.pack(anchor=tk.W)
+        for label, action in (("Add…", "add"), ("Remove", "remove"), ("Up", "up"), ("Down", "down")):
+            ttk.Button(bar, text=label, command=lambda a=action: self._edit_model_search_roots(a)).pack(
+                side=tk.LEFT, padx=(0, 6))
+
+    def _edit_model_search_roots(self, action):
+        roots = list(self._model_roots_list.get(0, tk.END))
+        selected = self._model_roots_list.curselection()
+        index = selected[0] if selected else None
+        if action == "add":
+            path = filedialog.askdirectory(title="Select model library or application folder")
+            if not path:
+                return
+            roots.append(os.path.abspath(path))
+            index = len(roots) - 1
+        elif index is None:
+            return
+        elif action == "remove":
+            roots.pop(index)
+            index = min(index, len(roots) - 1)
+        else:
+            target = index + (-1 if action == "up" else 1)
+            if not 0 <= target < len(roots):
+                return
+            roots[index], roots[target] = roots[target], roots[index]
+            index = target
+        self._model_roots_list.delete(0, tk.END)
+        for root in roots:
+            self._model_roots_list.insert(tk.END, root)
+        if roots:
+            self._model_roots_list.selection_set(index)
+        self.prefs["model_search_roots"] = roots
+        save_prefs(self.prefs)
+
     def _browse_pref_file(self, pref_key):
         filepath = filedialog.askopenfilename(
             title="Select file",
@@ -20555,6 +20631,9 @@ class LoRATrainerGUI:
             for key, default in DEFAULT_PREFS.items():
                 if key in self.prefs_vars:
                     self.prefs_vars[key].set(default)
+            self.prefs["model_search_roots"] = []
+            self._model_roots_list.delete(0, tk.END)
+            save_prefs(self.prefs)
 
     def _open_prefs_file(self):
         if os.path.exists(PREFS_FILE):

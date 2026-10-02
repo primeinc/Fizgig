@@ -21,6 +21,22 @@ Pull requests are welcome — bug fixes, features, docs, pod/RunPod improvements
 - Match the surrounding code's style, and prefer editing `COLORS[...]`/shared helpers over
   hardcoding UI values.
 
+## Model discovery checks
+
+Install development tools with `python -m pip install -r requirements-dev.txt`.
+Run `python -m pytest` (or `xvfb-run -a python -m pytest` on headless Linux to include
+the Tk Preferences seam tests), and `python -m compileall -q src lora_trainer_gui.py`.
+For the new discovery module and focused tests, run:
+
+```sh
+python -m ruff check src/fizgig/model_sources.py tests/test_model_discovery.py tests/test_model_preferences.py
+python -m ruff format --check src/fizgig/model_sources.py tests/test_model_discovery.py tests/test_model_preferences.py
+```
+
+The legacy GUI/downloader currently have existing lint/format failures; these focused checks
+do not establish a repository-wide clean baseline. Discovery tests use temporary model roots
+and a local HF-cache fixture, with downloads stubbed; no GPU or real model weights are needed.
+
 ## Bugs and ideas
 
 Open an issue with the console output and your setup (GPU, OS, desktop or RunPod). Detailed

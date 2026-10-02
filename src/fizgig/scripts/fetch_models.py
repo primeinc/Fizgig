@@ -31,6 +31,8 @@ import os
 import struct
 import sys
 
+from fizgig.model_sources import resolve_weight
+
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 # Machine-readable progress for the GUI. Off by default so a terminal user keeps
@@ -279,12 +281,8 @@ def _download_with_progress(w, models_dir, token, log):
     return held["path"]
 
 
-def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
-    """Download one weight if needed and point its pref at it. Returns True if usable."""
-    dest = os.path.join(models_dir, w.filename)
-    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
-    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
-
+def find_weight(w, models_dir, prefs):
+    """Resolve an existing weight without downloading or modifying Preferences."""
     # A pref the user already set, pointing at a file that exists, is LEFT ALONE — existence is
     # the only test. Deliberately not the size check below: that exists to catch a transfer WE
     # just made being truncated, and applying it here would second-guess legitimate choices.
@@ -294,15 +292,29 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     # path overwritten with ours.
     current = str(prefs.get(w.pref_key) or "").strip()
     if current and os.path.isfile(current):
+        return current
+    return resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
+                          _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3))
+
+
+def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
+    """Download one weight if needed and point its pref at it. Returns True if usable."""
+    models_dir = os.path.abspath(models_dir)
+    dest = os.path.join(models_dir, w.filename)
+    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
+    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+    found = find_weight(w, models_dir, prefs)
+    current = str(prefs.get(w.pref_key) or "").strip()
+    if found and found == current:
         if os.path.basename(current) != w.filename:
             log(f"  [keep] {w.pref_key} -> {os.path.basename(current)} (your own choice, not replacing it)")
         else:
             log(f"  [ok]   {w.filename} — already set up")
         return True
 
-    if os.path.isfile(dest) and _valid_safetensors(dest, min_bytes):
-        log(f"  [have] {w.filename} — on disk, linking into Preferences")
-        prefs[w.pref_key] = dest
+    if found:
+        log(f"  [have] {w.filename} — {found}, linking into Preferences")
+        prefs[w.pref_key] = found
         return True
 
     if dry_run:
