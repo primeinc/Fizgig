@@ -12551,7 +12551,7 @@ class LoRATrainerGUI:
                 if pattern.search(content):
                     # Replacement via a function so re NEVER parses it as a template: a
                     # Windows path typed into the box used to write real newlines/tabs
-                    # into captions (\\n, \\t), and \\1 raised "invalid group reference".
+                    # into captions (\n, \\t), and \\1 raised "invalid group reference".
                     new_content = pattern.sub(lambda _m: replace_text, content)
                     results.append({
                         'file': txt_file,
@@ -12563,10 +12563,10 @@ class LoRATrainerGUI:
                         with open(txt_file, 'w', encoding='utf-8') as f:
                             f.write(new_content)
             except Exception as e:
-                self.update_caption_log(f"Error processing {txt_file}: {e}\\n")
+                self.update_caption_log(f"Error processing {txt_file}: {e}\n")
 
         if not preview_only:
-            self.update_caption_log(f"Replaced in {len(results)} files\\n")
+            self.update_caption_log(f"Replaced in {len(results)} files\n")
             self.refresh_caption_images()
 
         return results
@@ -12616,11 +12616,11 @@ class LoRATrainerGUI:
                     preview_text.insert(tk.END, chunk, tag)
                 else:
                     preview_text.insert(tk.END, chunk)
-            preview_text.insert(tk.END, "\\n")
+            preview_text.insert(tk.END, "\n")
 
         for result in results:
             filename = os.path.basename(result['file'])
-            preview_text.insert(tk.END, f"\\n=== {filename} ===\\n")
+            preview_text.insert(tk.END, f"\n=== {filename} ===\n")
             _insert_segments("BEFORE: ", result["old"], None, "find_hit")
             _insert_segments("AFTER:  ", result["old"], replace_text, "replace_hit")
 
