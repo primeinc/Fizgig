@@ -22,6 +22,36 @@ VENV_PYTHONW = os.path.join(HERE, "venv", "Scripts", "pythonw.exe")
 LOG = os.path.join(HERE, "launch_error.log")
 
 
+def _apply_saved_cuda_visibility():
+    """Apply the persisted GPU choice before importing anything that can touch CUDA.
+
+    The GUI also applies this preference in LoRATrainerGUI.__init__, but that is too late
+    for the launcher: the splash path imports the GUI module (and pre-warms torch/model
+    modules) before the constructor runs. CUDA_VISIBLE_DEVICES is latched when the first
+    CUDA context is created, so a workbench tool such as LoRA the Explorer could end up on
+    the system-default card while training subprocesses still received the saved preference.
+
+    An explicit environment value always wins, matching the GUI's existing contract.
+    """
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return os.environ["CUDA_VISIBLE_DEVICES"]
+    try:
+        import json
+        with open(os.path.join(HERE, "prefs.json"), encoding="utf-8") as fh:
+            want = str((json.load(fh) or {}).get("cuda_device", "")).strip()
+        if want:
+            os.environ["CUDA_VISIBLE_DEVICES"] = want
+            return want
+    except Exception:
+        pass
+    return ""
+
+
+# Do this before the venv relaunch as well: the child inherits the corrected environment.
+# More importantly, it happens before _start_with_splash imports torch/transformers.
+_apply_saved_cuda_visibility()
+
+
 def _report(title, message, detail=""):
     """The failure path. Must not use Tkinter, and must not raise."""
     logged = False
