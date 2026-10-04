@@ -10694,20 +10694,23 @@ class LoRATrainerGUI:
         # Card 4: Find & Replace
         fr_card = self._start_section_card(
             outer, "Find & Replace",
-            "Bulk-edit every `.txt` caption file in the image folder. Preview first to see which files change.",
+            "Bulk-edit every \`.txt\` caption file in the image folder. Preview first to see which files change.",
         )
         fr_card.grid_columnconfigure(1, weight=1)
 
         ttk.Label(fr_card, text="Find:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.find_text_var = tk.StringVar()
         ttk.Entry(fr_card, textvariable=self.find_text_var, width=40).grid(row=0, column=1, sticky=tk.EW, pady=4)
+        self.find_whole_word_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(fr_card, text="Whole word", variable=self.find_whole_word_var).grid(
+            row=0, column=2, sticky=tk.W, padx=(10, 0), pady=4)
 
         ttk.Label(fr_card, text="Replace:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.replace_text_var = tk.StringVar()
         ttk.Entry(fr_card, textvariable=self.replace_text_var, width=40).grid(row=1, column=1, sticky=tk.EW, pady=4)
 
         fr_buttons = tk.Frame(fr_card, bg=COLORS["bg_surface"])
-        fr_buttons.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
+        fr_buttons.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
         ttk.Button(fr_buttons, text="Replace in All .txt Files", command=self.find_replace_in_captions).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(fr_buttons, text="Preview Changes", command=self.preview_find_replace).pack(side=tk.LEFT)
 
@@ -12509,8 +12512,8 @@ class LoRATrainerGUI:
         self.master.update_idletasks()
 
     def find_replace_in_captions(self, preview_only=False):
-        """Find and replace text in all caption files (case insensitive)"""
-        import re
+        """Find and replace literal text in all caption files (case insensitive)."""
+        from fizgig.caption_replace import compile_find_pattern
 
         folder = self.image_folder_var.get()
         find_text = self.find_text_var.get()
@@ -12526,9 +12529,8 @@ class LoRATrainerGUI:
 
         results = []
         txt_files = glob.glob(os.path.join(glob.escape(folder), "*.txt"))
-
-        # Compile case-insensitive pattern
-        pattern = re.compile(re.escape(find_text), re.IGNORECASE)
+        whole_word = self.find_whole_word_var.get() if hasattr(self, "find_whole_word_var") else True
+        pattern = compile_find_pattern(find_text, whole_word=whole_word)
 
         for txt_file in txt_files:
             try:
@@ -12559,34 +12561,60 @@ class LoRATrainerGUI:
         return results
 
     def preview_find_replace(self):
-        """Preview find/replace changes"""
+        """Preview every replacement, with source and replacement spans visibly distinct."""
+        from fizgig.caption_replace import compile_find_pattern, highlighted_segments
+
         results = self.find_replace_in_captions(preview_only=True)
 
         if not results:
             messagebox.showinfo("Preview", "No matches found")
             return
 
-        # Show preview dialog
+        find_text = self.find_text_var.get()
+        replace_text = self.replace_text_var.get()
+        whole_word = self.find_whole_word_var.get() if hasattr(self, "find_whole_word_var") else True
+        pattern = compile_find_pattern(find_text, whole_word=whole_word)
+        match_count = sum(len(list(pattern.finditer(result["old"]))) for result in results)
+
         dialog = tk.Toplevel(self.master)
         dialog.title("Find & Replace Preview")
         dialog.geometry("700x500")
         dialog.configure(bg=BG_COLOR)
 
-        ttk.Label(dialog, text=f"Found {len(results)} files with matches:", font=("Arial", 11, "bold")).pack(pady=10)
+        ttk.Label(
+            dialog,
+            text=f"Found {match_count} match{'es' if match_count != 1 else ''} in "
+                 f"{len(results)} file{'s' if len(results) != 1 else ''}:",
+            font=(FONT_FAMILY, 11, "bold"),
+        ).pack(pady=10)
 
-        # Scrollable text area
-        preview_text = scrolledtext.ScrolledText(dialog, height=20, width=80, bg=ENTRY_BG, fg=FG_COLOR, wrap="word")
+        # Full captions, not the old first-200-characters truncation: a preview that can
+        # hide the actual match is not a preview. Amber = source match, green = replacement.
+        preview_text = scrolledtext.ScrolledText(
+            dialog, height=20, width=80, bg=ENTRY_BG, fg=FG_COLOR, wrap="word")
         preview_text.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+        preview_text.tag_configure(
+            "find_hit", background=COLORS["warning"], foreground=COLORS["bg_deep"])
+        preview_text.tag_configure(
+            "replace_hit", background=COLORS["success"], foreground=COLORS["bg_deep"])
+
+        def _insert_segments(prefix, text, replacement, tag):
+            preview_text.insert(tk.END, prefix)
+            for chunk, highlighted in highlighted_segments(text, pattern, replacement):
+                if highlighted:
+                    preview_text.insert(tk.END, chunk, tag)
+                else:
+                    preview_text.insert(tk.END, chunk)
+            preview_text.insert(tk.END, "\n")
 
         for result in results:
             filename = os.path.basename(result['file'])
             preview_text.insert(tk.END, f"\n=== {filename} ===\n")
-            preview_text.insert(tk.END, f"BEFORE: {result['old'][:200]}...\n" if len(result['old']) > 200 else f"BEFORE: {result['old']}\n")
-            preview_text.insert(tk.END, f"AFTER:  {result['new'][:200]}...\n" if len(result['new']) > 200 else f"AFTER:  {result['new']}\n")
+            _insert_segments("BEFORE: ", result["old"], None, "find_hit")
+            _insert_segments("AFTER:  ", result["old"], replace_text, "replace_hit")
 
         preview_text.configure(state="disabled")
 
-        # Apply button
         def apply_changes():
             self.find_replace_in_captions(preview_only=False)
             dialog.destroy()
