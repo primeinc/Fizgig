@@ -31,6 +31,9 @@ import os
 import struct
 import sys
 
+from fizgig import model_sources
+from fizgig.model_sources import resolve_weight
+
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 # Machine-readable progress for the GUI. Off by default so a terminal user keeps
@@ -154,6 +157,21 @@ def _described_helpers():
 
 DESCRIBED = _described_families()
 FAMILIES.update(DESCRIBED)
+
+
+def model_candidates(families=None, include_optional=True):
+    """Return the canonical path-backed weights for the requested families."""
+    selected = tuple(FAMILIES) if families is None else families
+    weights = []
+    seen = set()
+    for family in selected:
+        for weight in FAMILIES.get(family, ()):
+            if weight.pref_key in seen or (weight.optional and not include_optional):
+                continue
+            weights.append(weight)
+            seen.add(weight.pref_key)
+    return weights
+
 
 # Loaded by name at runtime, so there is no pref to write — see the module docstring.
 TOOLS = [
@@ -279,12 +297,8 @@ def _download_with_progress(w, models_dir, token, log):
     return held["path"]
 
 
-def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
-    """Download one weight if needed and point its pref at it. Returns True if usable."""
-    dest = os.path.join(models_dir, w.filename)
-    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
-    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
-
+def find_weight(w, models_dir, prefs):
+    """Resolve an existing weight without downloading or modifying Preferences."""
     # A pref the user already set, pointing at a file that exists, is LEFT ALONE — existence is
     # the only test. Deliberately not the size check below: that exists to catch a transfer WE
     # just made being truncated, and applying it here would second-guess legitimate choices.
@@ -294,15 +308,32 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     # path overwritten with ours.
     current = str(prefs.get(w.pref_key) or "").strip()
     if current and os.path.isfile(current):
+        return current
+    return resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
+                          _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3))
+
+
+def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
+    """Download one weight if needed and point its pref at it. Returns True if usable."""
+    models_dir = os.path.abspath(models_dir)
+    dest = os.path.join(models_dir, w.filename)
+    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
+    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+    found = find_weight(w, models_dir, prefs)
+    if found is model_sources.AMBIGUOUS:
+        log(f"  [ambiguous] {w.filename} — multiple equally strong local candidates; not downloading")
+        return False
+    current = str(prefs.get(w.pref_key) or "").strip()
+    if found and found == current:
         if os.path.basename(current) != w.filename:
             log(f"  [keep] {w.pref_key} -> {os.path.basename(current)} (your own choice, not replacing it)")
         else:
             log(f"  [ok]   {w.filename} — already set up")
         return True
 
-    if os.path.isfile(dest) and _valid_safetensors(dest, min_bytes):
-        log(f"  [have] {w.filename} — on disk, linking into Preferences")
-        prefs[w.pref_key] = dest
+    if found:
+        log(f"  [have] {w.filename} — {found}, linking into Preferences")
+        prefs[w.pref_key] = found
         return True
 
     if dry_run:
@@ -412,10 +443,9 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
     if not dry_run:
         os.makedirs(models_dir, exist_ok=True)
     prefs = _load_prefs(prefs_file)
-    prefs_before = json.dumps(prefs, sort_keys=True)
+    prefs_before = dict(prefs)
 
-    planned = [w for fam in families if fam in FAMILIES for w in FAMILIES[fam]
-               if include_optional or not w.optional]
+    planned = model_candidates(families, include_optional=include_optional)
     total = sum(w.gb for w in planned) + (
         sum(g for _, g, _ in TOOLS) if "tools" in families else 0)
     log(f"Fetching: {', '.join(families)}  (~{total:.1f} GB)")
@@ -438,7 +468,7 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
             ok = False
             continue
         log(f"{fam}:")
-        for w in FAMILIES[fam]:
+        for w in model_candidates((fam,), include_optional=True):
             if w.optional and not include_optional:
                 log(f"  [skip] {w.filename} (~{w.gb:g} GB) — optional: {w.note}")
                 continue
@@ -448,8 +478,16 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
 
     # Only rewrite prefs.json if we actually changed something — a tools-only run has no paths
     # to record, and there's no reason to touch a user's settings file to say so.
-    if not dry_run and json.dumps(prefs, sort_keys=True) != prefs_before:
-        _save_prefs(prefs_file, prefs)
+    if not dry_run and prefs != prefs_before:
+        latest = _load_prefs(prefs_file)
+        unchanged = object()
+        latest.update({
+            key: value
+            for key, value in prefs.items()
+            if value != prefs_before.get(key, unchanged)
+            and latest.get(key, unchanged) == prefs_before.get(key, unchanged)
+        })
+        _save_prefs(prefs_file, latest)
         log(f"Preferences updated: {prefs_file}")
     log("Done." if ok else "Finished with some items missing — re-run to retry just those.")
     return ok

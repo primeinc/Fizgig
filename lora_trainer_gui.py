@@ -1364,6 +1364,7 @@ def _serialize_pref_path(value: str) -> str:
 
 
 DEFAULT_PREFS = {
+    "model_search_roots": [],
     # Model paths (absolute — point to external model downloads).
     # Blank on first launch; user fills these in via the Preferences tab. Each
     # row has a "Download" link that opens the correct HuggingFace repo.
@@ -1852,6 +1853,8 @@ class LoRATrainerGUI:
         self._cuda_device_applied = _apply_cuda_device_pref(self.prefs)
         self.prefs_vars = {}
         for key, default in DEFAULT_PREFS.items():
+            if key == "model_search_roots":
+                continue
             var = tk.StringVar(value=self.prefs.get(key, default))
             var.trace_add("write", lambda *a, k=key: self._save_pref(k))
             self.prefs_vars[key] = var
@@ -19577,6 +19580,21 @@ class LoRATrainerGUI:
                  fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT
                  ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(4, 10))
+        search_bar = tk.Frame(content, bg=COLORS["bg_surface"])
+        search_bar.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
+        search_btn = ttk.Button(
+            search_bar, text="🔎 Search locally",
+            command=lambda f=family: self._start_model_search(f),
+        )
+        search_btn.pack(side=tk.LEFT)
+        self._model_search_buttons = getattr(self, "_model_search_buttons", [])
+        self._model_search_buttons.append(search_btn)
+        search_status = tk.Label(
+            search_bar, text="", font=(FONT_FAMILY, 9),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        search_status.pack(side=tk.LEFT, padx=(10, 0))
+        setattr(self, f"_model_search_status_{family}", search_status)
 
         def _refresh_badge(*_a):
             n = _missing()
@@ -19592,7 +19610,7 @@ class LoRATrainerGUI:
         _refresh_badge()
         for k in keys:
             self.prefs_vars[k].trace_add("write", _refresh_badge)
-        return content, 1
+        return content, 2
 
     def _generic_prefs_section(self, parent, d):
         """Standard layer: a family's model-path section built from its description (rows, Download links,
@@ -19637,6 +19655,8 @@ class LoRATrainerGUI:
             "Centralised paths + inference performance knobs. Changes here propagate to every tab automatically "
             "and persist to prefs.json.",
         )
+
+        self._create_model_search_roots(outer)
 
         # The three model-family sections are collapsible, and smart about it: a family with a
         # required path still blank starts open, a configured one starts closed. Click the
@@ -20324,7 +20344,7 @@ class LoRATrainerGUI:
         self.master.wait_window(dlg)
         return result["token"]
 
-    def _start_fetch_models(self, family):
+    def _start_fetch_models(self, family, _needs_token=None):
         """Run the fetcher in a worker thread, streaming progress into the status label."""
         if getattr(self, "_fetch_running", False):
             messagebox.showinfo("Already downloading", "A model download is already running.")
@@ -20336,7 +20356,26 @@ class LoRATrainerGUI:
             # An HF_TOKEN already in the environment (the container's documented env var for
             # exactly this) satisfies the gate with no prompt — only ask when there isn't one.
             token = os.environ.get("HF_TOKEN", "").strip()
-            if not token:
+            if not token and _needs_token is None:
+                # Resolve locally on a worker before asking for credentials. A cached or
+                # user-root Klein weight needs no licence request or network access.
+                self._fetch_running = True
+                prefs = dict(self.prefs)
+
+                def resume(needs_token):
+                    self._fetch_running = False
+                    self._start_fetch_models(family, _needs_token=needs_token)
+
+                def probe():
+                    from fizgig.scripts.fetch_models import FAMILIES, find_weight
+                    models_dir = os.path.join(FIZGIG_DIR, "models")
+                    needs_token = any(w.gated and not find_weight(w, models_dir, prefs)
+                                      for w in FAMILIES[family])
+                    self.master.after(0, lambda: resume(needs_token))
+
+                threading.Thread(target=probe, daemon=True).start()
+                return
+            if not token and _needs_token:
                 token = self._ask_hf_token()
                 if not token:
                     return
@@ -20565,6 +20604,168 @@ class LoRATrainerGUI:
         row += 1
         return row
 
+    def _create_model_search_roots(self, parent):
+        card = tk.LabelFrame(parent, text="Model search roots", bg=COLORS["bg_surface"],
+                             fg=COLORS["text_primary"], padx=12, pady=10)
+        card.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(card, text="Search all models or search locally in a family section to scan these roots only — "
+                 "this never downloads. Select a model library or application folder "
+                 "(ComfyUI, Forge, SwarmUI, Fooocus, Stability Matrix).\n"
+                 "Existing per-model paths stay unchanged; Browse below remains an explicit override.",
+                 bg=COLORS["bg_surface"], fg=COLORS["text_explain"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W)
+        self._model_roots_list = tk.Listbox(card, height=4, exportselection=False,
+                                          bg=COLORS["bg_deep"], fg=COLORS["text_primary"])
+        self._model_roots_list.pack(fill=tk.X, pady=8)
+        roots = self.prefs.get("model_search_roots", [])
+        if isinstance(roots, list):
+            for root in roots:
+                if isinstance(root, str):
+                    self._model_roots_list.insert(tk.END, root)
+        bar = tk.Frame(card, bg=COLORS["bg_surface"])
+        bar.pack(anchor=tk.W)
+        for label, action in (("Add…", "add"), ("Remove", "remove"), ("Up", "up"), ("Down", "down")):
+            ttk.Button(bar, text=label, command=lambda a=action: self._edit_model_search_roots(a)).pack(
+                side=tk.LEFT, padx=(0, 6))
+        self._model_search_buttons = getattr(self, "_model_search_buttons", [])
+        self._model_search_all_btn = ttk.Button(
+            bar, text="🔎 Search all models",
+            command=lambda: self._start_model_search(),
+        )
+        self._model_search_all_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self._model_search_buttons.append(self._model_search_all_btn)
+        self._model_search_status = tk.Label(
+            card, text="", font=(FONT_FAMILY, 9),
+            fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        self._model_search_status.pack(anchor=tk.W, pady=(6, 0))
+
+    def _start_model_search(self, family=None):
+        """Search configured roots in the background and fill only unset model paths."""
+        if getattr(self, "_model_search_running", False):
+            return
+        roots = self.prefs.get("model_search_roots", [])
+        roots = [root for root in roots if isinstance(root, str) and root.strip()] \
+            if isinstance(roots, list) else []
+        status = (getattr(self, f"_model_search_status_{family}", None)
+                  if family else getattr(self, "_model_search_status", None))
+        if not roots:
+            if status:
+                status.config(text="Add a model search root first.")
+            return
+
+        from fizgig.scripts.fetch_models import model_candidates
+        if family:
+            weights = model_candidates((family,))
+        else:
+            weights = model_candidates()
+        weights = [weight for weight in weights if weight.pref_key in self.prefs_vars]
+        if not weights:
+            if status:
+                status.config(text="No model paths are available to search.")
+            return
+
+        prefs = dict(self.prefs)
+        prefs.update({key: var.get() for key, var in self.prefs_vars.items()})
+        self._model_search_running = True
+        for button in getattr(self, "_model_search_buttons", ()):
+            button.config(state="disabled")
+        if status:
+            status.config(text="Searching model roots…")
+
+        def worker():
+            from fizgig import model_sources
+            from fizgig.scripts.fetch_models import _valid_safetensors
+
+            found, kept = {}, set()
+            try:
+                for weight in weights:
+                    current = str(prefs.get(weight.pref_key) or "").strip()
+                    if current and os.path.isfile(current):
+                        found[weight.pref_key] = current
+                        kept.add(weight.pref_key)
+                        continue
+                    path = model_sources.search_model_roots(
+                        weight, roots, _valid_safetensors,
+                        int(weight.gb * 0.8 * 1024 ** 3),
+                    )
+                    if path is not None and path is not model_sources.AMBIGUOUS:
+                        found[weight.pref_key] = path
+                self.master.after(
+                    0, lambda: self._finish_model_search(family, weights, found, kept)
+                )
+            except (OSError, ValueError) as exc:
+                self.master.after(
+                    0, lambda error=exc: self._finish_model_search(
+                        family, weights, found, kept, error
+                    )
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_model_search(self, family, weights, found, kept, error=None):
+        """Apply scan results on the Tk thread and persist resolved paths."""
+        self._model_search_running = False
+        for button in getattr(self, "_model_search_buttons", ()):
+            try:
+                button.config(state="normal")
+            except tk.TclError:
+                pass
+        if error:
+            result = f"Search failed: {type(error).__name__}: {error}"
+        else:
+            updated = 0
+            for key, path in found.items():
+                if key in kept:
+                    continue
+                var = self.prefs_vars.get(key)
+                if var is not None:
+                    var.set(path)
+                    self.prefs[key] = path
+                    updated += 1
+            if updated:
+                save_prefs(self.prefs)
+            missing = len(weights) - len(found)
+            result = (
+                f"Search complete: {updated} found, {len(kept)} already set, "
+                f"{missing} not found."
+            )
+        statuses = [getattr(self, "_model_search_status", None)]
+        if family:
+            statuses.append(getattr(self, f"_model_search_status_{family}", None))
+        for status in statuses:
+            if status:
+                status.config(text=result)
+
+    def _edit_model_search_roots(self, action):
+        roots = list(self._model_roots_list.get(0, tk.END))
+        selected = self._model_roots_list.curselection()
+        index = selected[0] if selected else None
+        if action == "add":
+            path = filedialog.askdirectory(title="Select model library or application folder")
+            if not path:
+                return
+            roots.append(os.path.abspath(path))
+            index = len(roots) - 1
+        elif index is None:
+            return
+        elif action == "remove":
+            roots.pop(index)
+            index = min(index, len(roots) - 1)
+        else:
+            target = index + (-1 if action == "up" else 1)
+            if not 0 <= target < len(roots):
+                return
+            roots[index], roots[target] = roots[target], roots[index]
+            index = target
+        self._model_roots_list.delete(0, tk.END)
+        for root in roots:
+            self._model_roots_list.insert(tk.END, root)
+        if roots:
+            self._model_roots_list.selection_set(index)
+        self.prefs["model_search_roots"] = roots
+        save_prefs(self.prefs)
+
     def _browse_pref_file(self, pref_key):
         filepath = filedialog.askopenfilename(
             title="Select file",
@@ -20583,6 +20784,9 @@ class LoRATrainerGUI:
             for key, default in DEFAULT_PREFS.items():
                 if key in self.prefs_vars:
                     self.prefs_vars[key].set(default)
+            self.prefs["model_search_roots"] = []
+            self._model_roots_list.delete(0, tk.END)
+            save_prefs(self.prefs)
 
     def _open_prefs_file(self):
         if os.path.exists(PREFS_FILE):
