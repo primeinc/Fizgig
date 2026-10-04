@@ -26,3 +26,8 @@ def test_preview_segments_mark_only_changed_text():
     after = list(highlighted_segments("her dog together", pattern, "his"))
     assert before == [("her", True), (" dog together", False)]
     assert after == [("his", True), (" dog together", False)]
+
+
+def test_whole_word_keeps_literal_edge_punctuation_and_spaces():
+    assert _matches("a her dog; together", " her ") == [" her "]
+    assert _matches("(her) together", "(her)") == ["(her)"]
