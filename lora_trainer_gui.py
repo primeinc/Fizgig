@@ -10694,7 +10694,7 @@ class LoRATrainerGUI:
         # Card 4: Find & Replace
         fr_card = self._start_section_card(
             outer, "Find & Replace",
-            "Bulk-edit every \`.txt\` caption file in the image folder. Preview first to see which files change.",
+            "Bulk-edit every `.txt` caption file in the image folder. Preview first to see which files change.",
         )
         fr_card.grid_columnconfigure(1, weight=1)
 
