@@ -15,7 +15,12 @@ def compile_find_pattern(find_text: str, whole_word: bool = True) -> Pattern[str
     """
     expr = re.escape(find_text)
     if whole_word:
-        expr = rf"(?<!\w){expr}(?!\w)"
+        # Only add a boundary on an edge that is itself a word character. This keeps
+        # punctuation/phrase searches literal and even preserves the old " her " workaround.
+        if find_text and re.match(r"\w", find_text[0]):
+            expr = rf"(?<!\w){expr}"
+        if find_text and re.match(r"\w", find_text[-1]):
+            expr = rf"{expr}(?!\w)"
     return re.compile(expr, re.IGNORECASE)
 
 
