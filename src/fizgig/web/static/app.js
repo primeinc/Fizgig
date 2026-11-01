@@ -73,6 +73,8 @@ async function boot() {
   const pr = await api("/api/prefs");
   S.prefs = pr.models || {};
   S.modelRoots = pr.model_search_roots || [];
+  S.modelDownloadLayout = pr.model_download_layout || "fizgig";
+  S.modelDownloadRoot = pr.model_download_root || "";
   S.captioner = pr.captioner;              // the secondary captioning model's row
   S.webPort = pr.web_port;
   S.portNow = pr.port_now;
@@ -945,6 +947,7 @@ function renderPrefs() {
   host.append(outputFolderCard());
   host.append(foldersCard());
   host.append(modelRootsCard());
+  host.append(modelDownloadCard());
   host.append(inferenceCard());
   host.append(captionerCard());
   const gpuCard = gpuPickCard();
@@ -1107,6 +1110,46 @@ async function startModelSearch(family, choices) {
     S.modelSearch = {state: "failed", family, error: e.message};
     paintModelSearch();
   }
+}
+
+// New downloads can live in the model subfolders understood by ComfyUI or SwarmUI.
+// Existing path selections are never moved, and the chosen library must be on Fizgig's machine.
+function modelDownloadCard() {
+  const select = el("select", {class: "w-combo"},
+    el("option", {value: "fizgig", text: "Fizgig's own model folder"}),
+    el("option", {value: "comfyui", text: "ComfyUI folder names"}),
+    el("option", {value: "swarmui", text: "SwarmUI folder names"}));
+  select.value = S.modelDownloadLayout || "fizgig";
+  const root = el("input", {type: "text", class: "w-path", value: S.modelDownloadRoot || "",
+    placeholder: "The ComfyUI / SwarmUI application folder or its models folder"});
+  const status = el("div", {class: "field-hint",
+    text: "New downloads only. Existing paths stay where they are; no model files will be moved."});
+  const rootRow = el("div", {class: "field-row"},
+    el("span", {class: "field-label", text: "Library on Fizgig's computer:"}), root,
+    el("button", {class: "btn", text: "Choose…",
+      onclick: () => pick(root.value, true, (chosen) => { root.value = chosen; })}));
+  const show = () => { rootRow.style.display = select.value === "fizgig" ? "none" : ""; };
+  select.addEventListener("change", show);
+  show();
+  const save = async () => {
+    try {
+      await api("/api/prefs", {changes: {model_download_layout: select.value, model_download_root: root.value.trim()}});
+      const next = await api("/api/prefs");
+      S.modelDownloadLayout = next.model_download_layout || "fizgig";
+      S.modelDownloadRoot = next.model_download_root || "";
+      root.value = S.modelDownloadRoot;
+      status.textContent = "Saved. The next missing model downloads into this library.";
+    } catch (e) { status.textContent = e.message; }
+  };
+  return el("div", {class: "section-card"},
+    el("div", {class: "card-title"}, el("span", {text: "Where to save new models"})),
+    el("div", {class: "card-desc", text: "Put missing downloaded model files directly into the appropriate " +
+      "diffusion_models, text_encoders, VAE and LoRA subfolders. Select your actual SwarmUI ModelRoot " +
+      "if it is customized. Fizgig still prefers already configured model files."}),
+    el("div", {class: "card-content"},
+      el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Folder layout:"}), select),
+      rootRow, el("div", {class: "field-row"},
+        el("button", {class: "btn btn-accent", text: "Save download location", onclick: save})), status));
 }
 
 // the secondary captioning model (#270): set, it captions everything (the Captions tab and auto-recaption);

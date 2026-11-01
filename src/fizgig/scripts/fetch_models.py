@@ -31,7 +31,7 @@ import os
 import struct
 import sys
 
-from fizgig import model_sources
+from fizgig import model_sources, model_destinations
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -356,14 +356,24 @@ def find_weight(w, models_dir, prefs, scan_cache=None):
     other = str(prefs.get(other_key) or "").strip() if other_key else ""
     if other and os.path.isfile(other):
         return other
-    return model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
-                                        _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3),
-                                        cache=scan_cache)
+    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+    found = model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
+                                         _valid_safetensors, min_bytes, cache=scan_cache)
+    if found is model_sources.AMBIGUOUS or found:
+        return found
+    # The chosen output library is also a source, but user roots and the HF cache
+    # retain precedence. A missing external destination must not break local discovery.
+    try:
+        _download_parent, saved_path = model_destinations.destination(w, models_dir, prefs)
+    except ValueError:
+        return None
+    if os.path.isfile(saved_path) and _valid_safetensors(saved_path, min_bytes):
+        return saved_path
+    return None
 
 
 def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
-    dest = os.path.join(models_dir, w.filename)
     # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
     min_bytes = int(w.gb * 0.8 * 1024 ** 3)
 
@@ -409,6 +419,11 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
         prefs[w.pref_key] = found
         return True
 
+    try:
+        download_parent, dest = model_destinations.destination(w, models_dir, prefs)
+    except ValueError as error:
+        log(f"  [fail] {w.filename}: {error}")
+        return False
     if dry_run:
         log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
         return True
@@ -418,11 +433,12 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
 
     log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
     try:
+        os.makedirs(download_parent, exist_ok=True)
         if EMIT_PROGRESS:
-            got = _download_with_progress(w, models_dir, token, log)
+            got = _download_with_progress(w, download_parent, token, log)
         else:
             from fizgig.utils import hf_public
-            got = hf_public.download(repo_id=w.repo, filename=w.path_in_repo, local_dir=models_dir,
+            got = hf_public.download(repo_id=w.repo, filename=w.path_in_repo, local_dir=download_parent,
                                      token=token or os.environ.get("HF_TOKEN") or None, log=log)
     except Exception as e:
         name = type(e).__name__
@@ -437,22 +453,21 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
             log(f"  [fail] {w.filename}: {name}: {e}")
         return False
 
-    # hf_hub_download preserves the repo's folder structure under local_dir; the GUI just wants
-    # a file, so flatten it into models/ and leave no stray nested dirs behind.
+    # Validate the downloaded artifact before moving it into another application's library.
     got = os.path.abspath(got)
-    if got != dest:
+    if not _valid_safetensors(got, min_bytes):
+        log(f"  [fail] {w.filename} downloaded but failed verification — leaving it for a re-run")
+        return False
+    if os.path.normcase(got) != os.path.normcase(dest):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         os.replace(got, dest)
         d = os.path.dirname(got)
-        while os.path.normpath(d) != os.path.normpath(models_dir):
+        while os.path.normcase(d) != os.path.normcase(download_parent):
             try:
                 os.rmdir(d)
             except OSError:
                 break
             d = os.path.dirname(d)
-
-    if not _valid_safetensors(dest, min_bytes):
-        log(f"  [fail] {w.filename} downloaded but failed verification — leaving it for a re-run")
-        return False
 
     prefs[w.pref_key] = dest
     log(f"  [done] {w.filename}")
@@ -559,7 +574,8 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
     total = sum(w.gb for w in planned) + (
         sum(g for _, g, _ in TOOLS) if "tools" in families else 0)
     log(f"Fetching: {', '.join(families)}  (~{total:.1f} GB)")
-    log(f"Into: {models_dir}")
+    layout = str(prefs.get("model_download_layout") or "fizgig")
+    log(f"Storage: {layout}" + (f" — {prefs.get('model_download_root')}" if layout != "fizgig" else f" — {models_dir}"))
     if any(w.gated for w in planned) and not (token or os.environ.get("HF_TOKEN")):
         log("Note: some of these need a HuggingFace token — accept the licence on the model page,")
         log("      then pass --token hf_... or set HF_TOKEN.")

@@ -2649,24 +2649,24 @@ def _fetch_on_use(f):
         try:
             from fizgig.scripts import fetch_models
             w = next((w for w in fetch_models.model_candidates() if w.pref_key == f.pref_key), None)
-            if w is not None:
-                found = fetch_models.find_weight(w, user_data.MODELS_DIR, load_prefs())
-                if found is fetch_models.model_sources.AMBIGUOUS:
-                    raise ValueError(f"Multiple local candidates for {f.pref_key}: choose one in Preferences")
-                if found:
-                    update_prefs({f.pref_key: str(found)})
-                    with _lock:
-                        _on_use[f.pref_key] = {"state": "done", "at": time.time()}
-                    return
-            from fizgig.utils import hf_public
-            got = hf_public.download(repo_id=f.repo, filename=f.path, local_dir=user_data.MODELS_DIR)
-            dest = os.path.join(user_data.MODELS_DIR, f.local_name or os.path.basename(f.path))
-            if os.path.normcase(os.path.abspath(got)) != os.path.normcase(os.path.abspath(dest)):
-                os.replace(got, dest)             # a file in a repo subfolder: to the models folder itself
-            update_prefs({f.pref_key: dest})
+            if w is None:    # fetch-on-use models are intentionally absent from the bulk download catalog
+                w = fetch_models.Weight(f.pref_key, f.repo, f.path, f.size_gb, f.label,
+                                        gated=f.gated, local_name=f.local_name or None)
+            prefs = load_prefs()
+            previous = str(prefs.get(f.pref_key) or "").strip()
+            if not fetch_models.fetch_weight(w, user_data.MODELS_DIR, prefs, log=logger.info):
+                raise ValueError(f"Couldn't find or download {f.pref_key}; check the local model paths.")
+            path = str(prefs.get(f.pref_key) or "").strip()
+            if path:
+                # A manual selection made while the download ran remains authoritative.
+                with _lock:
+                    latest = load_prefs()
+                    if str(latest.get(f.pref_key) or "").strip() == previous:
+                        latest[f.pref_key] = path
+                        _write_json(PREFS_FILE, latest)
             with _lock:
                 _on_use[f.pref_key] = {"state": "done", "at": time.time()}
-            logger.info(f"Downloaded {os.path.basename(dest)} on first use")
+            logger.info(f"Model {f.pref_key} ready: {path}")
         except Exception as e:
             with _lock:
                 _on_use[f.pref_key] = {"state": "failed", "at": time.time()}
@@ -2680,7 +2680,14 @@ def _on_use_gb(f):
     """How much of a first-use download has arrived, in GB: hf_hub_download's part file in the models folder's
     .cache (a hashed name ending .incomplete) until it is complete - the largest there, as a resumed one may sit
     beside an older leftover."""
-    d = os.path.join(user_data.MODELS_DIR, ".cache", "huggingface", "download", os.path.dirname(f.path))
+    from fizgig import model_destinations
+    from fizgig.scripts.fetch_models import Weight
+    try:
+        w = Weight(f.pref_key, f.repo, f.path, f.size_gb, f.label, local_name=f.local_name or None)
+        parent, _ = model_destinations.destination(w, user_data.MODELS_DIR, load_prefs())
+        d = os.path.join(parent, ".cache", "huggingface", "download", os.path.dirname(f.path))
+    except ValueError:
+        return 0.0
     try:
         return max((os.path.getsize(os.path.join(d, n)) for n in os.listdir(d) if n.endswith(".incomplete")),
                    default=0) / 2 ** 30
@@ -2987,6 +2994,8 @@ class Handler(BaseHTTPRequestHandler):
                                          for k in form.model_keys(d)},
                               "model_search_roots": p.get("model_search_roots")
                               if isinstance(p.get("model_search_roots"), list) else [],
+                              "model_download_layout": str(p.get("model_download_layout") or "fizgig"),
+                              "model_download_root": str(p.get("model_download_root") or ""),
                               "cache_dir": str(p.get("cache_dir") or ""),
                               "settings": {k: str(p.get(k) or "") for k in SETTING_PREFS},
                               "captioner": {"path": str(p.get(captions.SECONDARY_PREF) or ""),
@@ -4254,6 +4263,22 @@ class Handler(BaseHTTPRequestHandler):
                             seen.add(folded)
                             clean.append(path_on_host)
                     upd["model_search_roots"] = clean
+                if "model_download_layout" in ch or "model_download_root" in ch:
+                    from fizgig.model_destinations import LAYOUTS, library_root
+                    existing = load_prefs()
+                    layout = str(ch.get("model_download_layout",
+                                        existing.get("model_download_layout") or "fizgig")).strip().lower()
+                    root = str(ch.get("model_download_root",
+                                      existing.get("model_download_root") or "")).strip()
+                    if layout not in LAYOUTS or len(root) > 4096:
+                        return self.json({"error": "Choose Fizgig, ComfyUI or SwarmUI and a valid folder."}, 400)
+                    if layout != "fizgig":
+                        try:
+                            library_root(layout, root)
+                        except ValueError as error:
+                            return self.json({"error": str(error)}, 400)
+                    upd["model_download_layout"] = layout
+                    upd["model_download_root"] = os.path.abspath(os.path.expanduser(root)) if root else ""
                 if "cuda_device" in ch:
                     v = str(ch["cuda_device"] or "").strip()
                     if v and v not in {g["uuid"] for g in list_gpus()} | {str(g["index"]) for g in list_gpus()}:
