@@ -339,7 +339,7 @@ def _download_with_progress(w, models_dir, token, log):
     return held["path"]
 
 
-def find_weight(w, models_dir, prefs):
+def find_weight(w, models_dir, prefs, scan_cache=None):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
     A user-picked alternate build and replacement for a retired filename are exceptions:
@@ -357,10 +357,11 @@ def find_weight(w, models_dir, prefs):
     if other and os.path.isfile(other):
         return other
     return model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
-                                        _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3))
+                                        _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3),
+                                        cache=scan_cache)
 
 
-def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
+def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
     dest = os.path.join(models_dir, w.filename)
     # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
@@ -399,7 +400,7 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
         prefs[w.pref_key] = other
         return True
 
-    found = find_weight(w, models_dir, prefs)
+    found = find_weight(w, models_dir, prefs, scan_cache=scan_cache)
     if found is model_sources.AMBIGUOUS:
         log(f"  [ambiguous] {w.filename} — equally strong local files; choose the correct file in Preferences.")
         return False
@@ -411,6 +412,9 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     if dry_run:
         log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
         return True
+    if w.gated and not (token or os.environ.get("HF_TOKEN", "").strip()):
+        log(f"  [gated] {w.filename} is missing locally; {w.repo} needs a Hugging Face token.")
+        return False
 
     log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
     try:
@@ -562,6 +566,7 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
     log("")
 
     ok = True
+    scan_cache = {}
     for fam in families:
         if fam == "tools":
             log("Helper models (Florence-2, face model, person segmenter, translator, Whisper):")
@@ -582,7 +587,8 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
                 if not fetch_strangers(log=log, dry_run=dry_run):
                     ok = False
                 continue
-            if not fetch_weight(w, models_dir, prefs, token=token, log=log, dry_run=dry_run):
+            if not fetch_weight(w, models_dir, prefs, token=token, log=log, dry_run=dry_run,
+                                scan_cache=scan_cache):
                 ok = False
         log("")
 
@@ -593,10 +599,13 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
         # Preferences while this long-running subprocess downloaded are not lost.
         latest = _load_prefs(prefs_file)
         missing = object()
-        latest.update({key: value for key, value in prefs.items()
-                       if value != prefs_before.get(key, missing)})
-        _save_prefs(prefs_file, latest)
-        log(f"Preferences updated: {prefs_file}")
+        updates = {key: value for key, value in prefs.items()
+                   if value != prefs_before.get(key, missing)
+                   and latest.get(key, missing) == prefs_before.get(key, missing)}
+        if updates:
+            latest.update(updates)
+            _save_prefs(prefs_file, latest)
+            log(f"Preferences updated: {prefs_file}")
     log("Done." if ok else "Finished with some items missing — re-run to retry just those.")
     return ok
 

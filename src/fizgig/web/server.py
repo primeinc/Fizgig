@@ -2528,9 +2528,10 @@ def _start_model_search(family="", choices=None):
     def work():
         prefs = load_prefs()
         updates = {}
+        scan_cache = {}  # walk each configured model library at most once per search
         try:
             for w in weights:
-                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs)
+                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs, scan_cache=scan_cache)
                 current = str(prefs.get(w.pref_key) or "").strip()
                 if result is fetch_models.model_sources.AMBIGUOUS:
                     status, path = "ambiguous", ""

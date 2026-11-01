@@ -9,6 +9,9 @@ import pytest
 from fizgig import model_sources
 from fizgig.scripts import fetch_models
 
+# Save before the offline fixture patches it for ordinary resolution tests.
+real_automatic_roots = model_sources.automatic_roots
+
 
 def weight(name="my_model.safetensors", pref="demo", repo="owner/repo", path=None, **kwargs):
     return fetch_models.Weight(pref, repo, path or "diffusion_models/" + name,
@@ -133,7 +136,7 @@ def test_stability_matrix_library_pointer(tmp_path, monkeypatch):
     pointer.write_text(json.dumps({"LibraryPath": str(root)}), encoding="utf-8")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
-    assert model_sources.automatic_roots() == (root / "Models",)
+    assert real_automatic_roots() == (root / "Models",)
 
 
 def test_model_candidates_use_only_the_canonical_fetch_catalog(monkeypatch):
@@ -182,3 +185,49 @@ def test_fetch_does_not_erase_roots_edited_during_a_download(tmp_path, monkeypat
     saved = fetch_models._load_prefs(str(prefs_file))
     assert saved["model_search_roots"] == ["/changed"]
     assert saved[w.pref_key] == str(tmp_path / w.filename)
+
+
+def test_scan_cache_walks_a_library_only_once_for_multiple_models(tmp_path, monkeypatch):
+    one = weight(name="first_model.safetensors", pref="one")
+    two = weight(name="second_model.safetensors", pref="two")
+    root = tmp_path / "ComfyUI"
+    safetensor(root / "models" / one.filename)
+    safetensor(root / "models" / two.filename)
+    prefs = {"model_search_roots": [str(root)]}
+    walks = []
+    real_walk = model_sources.os.walk
+
+    def count_walk(*args, **kwargs):
+        walks.append(str(args[0]))
+        return real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(model_sources.os, "walk", count_walk)
+    cache = {}
+    assert fetch_models.find_weight(one, str(tmp_path / "downloads"), prefs, scan_cache=cache)
+    assert fetch_models.find_weight(two, str(tmp_path / "downloads"), prefs, scan_cache=cache)
+    assert walks == [str(root / "models")]
+
+
+def test_missing_gated_weight_needs_token_only_after_local_search(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    logs = []
+    w = weight(gated=True)
+    assert not fetch_models.fetch_weight(w, str(tmp_path / "downloads"), {}, log=logs.append)
+    assert any("[gated]" in line for line in logs)
+
+
+def test_fetch_never_overwrites_manual_path_saved_while_downloading(tmp_path, monkeypatch):
+    prefs_file = tmp_path / "user_data" / "prefs.json"
+    prefs_file.parent.mkdir(parents=True)
+    w = weight()
+    monkeypatch.setattr(fetch_models, "FAMILIES", {"demo": [w]})
+    fetch_models._save_prefs(str(prefs_file), {})
+
+    def intervening_download(w, models_dir, prefs, **_):
+        prefs[w.pref_key] = str(tmp_path / "downloaded.safetensors")
+        fetch_models._save_prefs(str(prefs_file), {w.pref_key: str(tmp_path / "manual.safetensors")})
+        return True
+
+    monkeypatch.setattr(fetch_models, "fetch_weight", intervening_download)
+    assert fetch_models.fetch(["demo"], repo_dir=str(tmp_path), log=lambda _: None)
+    assert fetch_models._load_prefs(str(prefs_file))[w.pref_key] == str(tmp_path / "manual.safetensors")

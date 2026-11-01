@@ -74,15 +74,28 @@ def automatic_roots():
     return ()
 
 
-def _find_in_roots(weight, roots, validate, min_bytes):
+def _find_in_roots(weight, roots, validate, min_bytes, cache=None):
     """Prefer a repo-relative suffix, then the local filename; ties are unsafe."""
     suffix = tuple(weight.path_in_repo.split("/"))
     repo = tuple(part.casefold() for part in weight.repo.split("/") if part)
     repo_suffix = repo + tuple(part.casefold() for part in suffix)
     names = {weight.filename, suffix[-1]}
     matches = {}
-    entries = (entry for root in roots for entry in os.walk(root, followlinks=False))
-    for directory, _dirs, files in entries:
+    # Reuse each directory listing across weights in one search/download invocation. Without
+    # this, a large shared ComfyUI tree gets traversed once PER model file.
+    def entries():
+        for root in roots:
+            if cache is None:
+                yield from ((directory, files) for directory, _dirs, files
+                            in os.walk(root, followlinks=False))
+            else:
+                key = os.path.normcase(os.path.abspath(root))
+                if key not in cache:
+                    cache[key] = [(directory, tuple(files)) for directory, _dirs, files
+                                  in os.walk(root, followlinks=False)]
+                yield from cache[key]
+
+    for directory, files in entries():
         for name in sorted(names.intersection(files)):
             candidate = Path(directory) / name
             candidate_parts = tuple(part.casefold() for part in candidate.parts)
@@ -115,7 +128,7 @@ def _find_in_roots(weight, roots, validate, min_bytes):
     return str(next(iter(best.values())).absolute())
 
 
-def search_model_roots(weight, roots, validate, min_bytes):
+def search_model_roots(weight, roots, validate, min_bytes, cache=None):
     """Search only the ordered roots the user selected, without cache or download fallbacks."""
     if not isinstance(roots, (list, tuple)):
         return None
@@ -123,7 +136,7 @@ def search_model_roots(weight, roots, validate, min_bytes):
         if not isinstance(selected, str) or not selected.strip():
             continue
         found = _find_in_roots(
-            weight, effective_roots(selected), validate, min_bytes
+            weight, effective_roots(selected), validate, min_bytes, cache=cache
         )
         if found is AMBIGUOUS:
             return AMBIGUOUS
@@ -132,9 +145,9 @@ def search_model_roots(weight, roots, validate, min_bytes):
     return None
 
 
-def resolve_weight(weight, roots, models_dir, validate, min_bytes):
+def resolve_weight(weight, roots, models_dir, validate, min_bytes, cache=None):
     """User trees, exact HF cache, known stores, then Fizgig's download directory."""
-    found = search_model_roots(weight, roots, validate, min_bytes)
+    found = search_model_roots(weight, roots, validate, min_bytes, cache=cache)
     if found is AMBIGUOUS:
         return AMBIGUOUS
     if found:
@@ -146,7 +159,7 @@ def resolve_weight(weight, roots, models_dir, validate, min_bytes):
     if isinstance(cached, str) and validate(cached, min_bytes):
         return os.path.abspath(cached)
     for root in (*automatic_roots(), Path(models_dir).absolute()):
-        found = _find_in_roots(weight, (root,), validate, min_bytes)
+        found = _find_in_roots(weight, (root,), validate, min_bytes, cache=cache)
         if found is AMBIGUOUS:
             return AMBIGUOUS
         if found:
