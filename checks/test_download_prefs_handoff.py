@@ -115,6 +115,8 @@ def test_web_download_passes_authoritative_preferences_file_to_subprocess(tmp_pa
     monkeypatch.setattr(server.subprocess, "Popen", lambda cmd, **kwargs:
                         (calls.append(cmd) or FakeProcess()))
     monkeypatch.setattr(server.threading, "Thread", FakeThread)
+    with server._lock:
+        saved = dict(server._fetch)
     try:
         with server._lock:
             server._fetch["proc"] = None
@@ -125,4 +127,5 @@ def test_web_download_passes_authoritative_preferences_file_to_subprocess(tmp_pa
         assert json.loads(prefs_file.read_text())["qwen21_dit"] == str(local)
     finally:
         with server._lock:
-            server._fetch["proc"] = None
+            server._fetch.clear()
+            server._fetch.update(saved)
