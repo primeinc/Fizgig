@@ -1022,10 +1022,46 @@ function mpRow(f, key, m) {
   const catalogSize = m.size_gb ? "Catalog estimate " + Number(m.size_gb).toFixed(2) + " GB" : "";
   const meta = el("div", {class: "mp-model-meta"},
     el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
-    ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, message);
+    ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, verification, message);
+  const verification = el("span", {class: "mp-row-progress", role: "status",
+    text: "Not tested", title: "Path existence does not verify model identity."});
+  const verifyButton = el("button", {class: "btn btn-sm", text: "Test model",
+    title: "Inspect the safetensors header and compare SHA-256 against the model catalog (no GPU load)."});
+  const verify = async () => {
+    verifyButton.disabled = true;
+    verification.textContent = "Starting…";
+    try {
+      await pending;
+      const started = await api("/api/models/verify", {family: f.key, key});
+      if (started.state !== "running") throw new Error(started.message || "Not started");
+      const watch = async () => {
+        const result = await api("/api/models/verify/status?family=" +
+          encodeURIComponent(f.key) + "&key=" + encodeURIComponent(key));
+        if (result.state === "running") {
+          const percent = result.total ? " " + Math.floor(100 * result.done / result.total) + "%" : "";
+          verification.textContent = "Testing " + (result.stage || "model") + percent + "…";
+          setTimeout(() => { if (verifyButton.isConnected) watch().catch((e) => {
+            verification.textContent = e.message; verifyButton.disabled = false;
+          }); }, 600);
+          return;
+        }
+        const names = {pass: "Verified", different: "Wrong build / custom",
+          unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
+        verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
+        verification.title = JSON.stringify(result.match || result.expected || result.reference_errors || {});
+        verification.dataset.result = result.state;
+        verifyButton.disabled = false;
+      };
+      await watch();
+    } catch (e) {
+      verification.textContent = "Test failed: " + e.message;
+      verifyButton.disabled = false;
+    }
+  };
+  verifyButton.addEventListener("click", verify);
   const actions = el("div", {class: "mp-model-actions"},
     el("button", {class: "btn btn-sm", text: "Choose…", title: "Choose a local model file", onclick: () =>
-      pick(input.value, false, (picked) => savePath(picked))}), clear);
+      pick(input.value, false, (picked) => savePath(picked))}), verifyButton, clear);
   if (m.repo && m.path) actions.append(el("a", {class: "btn btn-sm",
     target: "_blank", rel: "noopener", href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path,
     text: "Download ↗", title: "Open the official download page; does not start a background download"}));
@@ -1079,10 +1115,30 @@ function mpToolbar(families, f) {
         "measured file bytes · " + totals.folders + " folder(s) unmeasured" : "measured file bytes"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.remaining, true)}),
       el("small", {text: "required downloads left"})));
+  const testAll = el("button", {class: "btn", text: "Test selected models",
+    title: "Queue identity checks for each saved model of this family, one file at a time."});
+  testAll.addEventListener("click", async () => {
+    testAll.disabled = true;
+    try {
+      const rows = [...document.querySelectorAll(".mp-model-row")];
+      const buttons = rows.filter((row) => (S.prefs[row.dataset.key] || "").trim())
+        .map((row) => row.querySelector(".mp-model-actions button:nth-child(2)")).filter(Boolean);
+      for (const button of buttons) {
+        if (!testAll.isConnected) break;
+        button.click();
+        let spins = 0;
+        while (button.disabled && spins < 3600) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          spins++;
+        }
+        if (spins >= 3600) break;
+      }
+    } finally { testAll.disabled = false; }
+  });
   const top = el("div", {class: "mp-workspace-head"},
     el("div", {class: "mp-title-stack"}, el("h2", {text: "Model library"}),
       el("p", {text: "One family at a time. Reuse local files before downloading anything."})),
-    el("div", {class: "mp-toolbar-actions"},
+    el("div", {class: "mp-toolbar-actions"}, testAll,
       el("button", {class: "btn", text: "Search locally", title: "Search all saved model directories; no downloads",
         onclick: () => startModelSearch("")}),
       el("button", {class: "btn btn-primary", text: "Download missing…",
