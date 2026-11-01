@@ -14,6 +14,9 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
+LINUX = sys.platform.startswith("linux")
+UPDATER = "./update_fizgig.sh" if LINUX else "update_fizgig.bat"
+ROCM_UPDATER = "./install_fizgig_rocm.sh (run it again)" if LINUX else "update_fizgig_rocm.bat"
 
 # Which torch the venv has, probed in a child so this process never imports torch: exit 10 = a ROCm/HIP build,
 # 11 = anything else (CUDA/CPU), 12 = torch missing or broken. Distinct codes so a failed import is never mistaken
@@ -75,10 +78,10 @@ def cuda_deps():
         print()
         print("ERROR: This looks like an AMD ROCm install.")
         print()
-        print("  update_fizgig.bat installs CUDA packages from requirements.txt and would")
+        print(f"  {UPDATER} installs CUDA packages from requirements.txt and would")
         print("  overwrite your ROCm PyTorch / bitsandbytes stack.")
         print()
-        print("  Use instead:  update_fizgig_rocm.bat")
+        print(f"  Use instead:  {ROCM_UPDATER}")
         sys.exit(1)
     ensure_uv()
     if run([PY, "uv_install_deps.py", "requirements.txt", "venv"]) != 0:
@@ -138,7 +141,7 @@ def rocm_deps():
             fail("Failed to install the bitsandbytes wheel.")
     # Refresh the launcher env. Stay --experimental unless rocm_env.bat pins BNB_ROCM_VERSION.
     experimental = True
-    env_bat = os.path.join(HERE, "rocm_env.bat")
+    env_bat = os.path.join(HERE, "user_data", "rocm_env.bat")
     if os.path.exists(env_bat):
         experimental = "bnb_rocm_version=" not in open(env_bat, encoding="utf-8", errors="replace").read().lower()
     if experimental:
@@ -196,10 +199,12 @@ def main():
     except (AttributeError, ValueError):
         pass
     rocm = "--rocm" in sys.argv[1:]
+    if rocm and LINUX:            # the ROCm path below is Windows's (its bitsandbytes wheel, rocm_env.bat)
+        fail("On Linux, update an AMD ROCm install by running ./install_fizgig_rocm.sh again.")
     print("Updating Fizgig (AMD ROCm)..." if rocm else "Updating Fizgig...")
     clear_old_stage2()
     # Older installers overwrote the tracked launchers; restore them so they never block the pull.
-    for launcher in (("run_fizgig_rocm.bat", "run_fizgig.bat") if rocm else ("run_fizgig.bat",)):
+    for launcher in (("Launch Fizgig AMD.bat", "run_fizgig.bat") if rocm else ("run_fizgig.bat",)):
         quiet(["git", "checkout", "--", launcher])
     run(["git", "pull"])
     print()
@@ -209,12 +214,17 @@ def main():
         print()
     else:
         rocm_deps() if rocm else cuda_deps()
+        if LINUX:                                # Qt for the app window (install_fizgig.py's install_linux_window)
+            if run([PY, "-m", "uv", "pip", "install", "--python", PY, "pywebview[qt]>=5,<7"]) != 0:
+                print("NOTE: Qt for the app window didn't install; Fizgig opens in your browser instead.")
     # Community LoRAs + H3 training adapters. Idempotent, and a failure (offline) never aborts the update.
     run([PY, os.path.join("src", "fizgig", "scripts", "fetch_turbo_lora.py")])
     if not rocm:
         msvc_check()
     print()
-    print("Update complete! Launch with run_fizgig_rocm.bat" if rocm else "Update complete! Run Fizgig with run_fizgig.bat")
+    print("Update complete! Start Fizgig with ./launch_fizgig.sh (its own window) or ./launch_fizgig_browser.sh"
+          if LINUX else "Update complete! Start Fizgig with Launch Fizgig AMD.bat" if rocm else
+          "Update complete! Start Fizgig with Launch Fizgig.bat (its own window) or Launch Fizgig in browser.bat")
 
 
 if __name__ == "__main__":

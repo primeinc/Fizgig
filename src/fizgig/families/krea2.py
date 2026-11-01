@@ -4,7 +4,8 @@ its own cache files (arch_id krea2drv - the cache layout differs from the origin
 Facts are the original trainer's (src/fizgig/krea2/trainer.py - removed with the original family on 30 Sep 2026, in git history - utils.py, sampling.py), cited per value.
 """
 from fizgig.families.description import (
-    FamilyDescription, LoRAFormat, ModelFile, SamplingSettings, SpeedLoRA,
+    GENERAL_NEGATIVE,
+    FamilyDescription, LoRAFormat, ModelFile, SamplingSettings, SpeedLoRA, TextEncoderBuild,
 )
 
 _COMFY = "Comfy-Org/Krea-2"
@@ -30,11 +31,13 @@ def _preset(rank, lr=1e-4, adaptive=None, epochs=30, slider=False, mp="0.25"):
 
 KREA2 = FamilyDescription(
     key="krea2",
+    start_lr_bands=(("lora", 3e-5, 3e-4), ("slider", 7e-5, 6e-4)),
+    masked_training=True,
     arch_id="krea2drv",
     display_name="Krea 2",
     gui_label="Krea 2",
     lora_name_suffix="krea2",
-    experimental=True,
+    experimental=False,
 
     model_files=(
         ModelFile("krea2_raw_dit", "Krea 2 RAW DiT", True, _COMFY, "diffusion_models/krea2_raw_bf16.safetensors",
@@ -47,10 +50,10 @@ KREA2 = FamilyDescription(
                   "bf16, virtually identical output.", role="text_encoder"),
         ModelFile("krea2_turbo_lora", "Turbo LoRA (previews)", False, _COMFY,
                   "loras/krea2_turbo_lora_rank_64_bf16.safetensors", 0.47,
-                  "Optional: 8-step previews on the training model.", role="speed_lora"),
+                  "8-step previews on the training model.", role="speed_lora", fetch_optional=False),
         ModelFile("krea2_turbo_dit", "Turbo DiT (fp8, workbench previews)", False, _COMFY,
                   "diffusion_models/krea2_turbo_fp8_scaled.safetensors", 13.1,
-                  "Optional: Repair Studio, LoRA the Explorer and LoRA Royale preview on it by default (8-step, "
+                  "Optional: Repair Studio and LoRA Royale preview on it by default (8-step, "
                   "CFG-free); without it they use the Turbo LoRA on the RAW model.", role="preview_dit"),
     ),
     prefs_note=("💡 Already have these files for ComfyUI? Filling the paths in by hand works perfectly — the download "
@@ -58,6 +61,23 @@ KREA2 = FamilyDescription(
                 "quietly fetches a few tiny helper files and keeps them, and from then on everything runs fully "
                 "offline. Setting up a machine that will never see the internet? Paste a complete HuggingFace model "
                 "folder into the text encoder field instead of a single file and nothing needs downloading at all."),
+    # measured 21 Oct 2026 with scripts/check_te_builds.py against qwen3vl_4b_fp8_scaled; the int8 (convrot) builds,
+    # Comfy-Org's and Huihui's, don't load in Krea 2's encoder loader
+    text_encoder_builds=(
+        TextEncoderBuild("bf16", _COMFY, "text_encoders/qwen3vl_4b_bf16.safetensors", 8.88,
+                         "36f3ff447ef59201722e8f9ce6020c9819fdcfba6aa2608c4e09b1c0ce114e34", 0.99897),
+        TextEncoderBuild("bf16 (Flux 3's copy)", "black-forest-labs/flux-3-image-klein-comfy",
+                         "text_encoders/qwen3vl_4b_bf16.safetensors", 8.88,
+                         "f0b24fc5c8d7c0ea6ca909da14c20af5cac53f22506be942c6c956f838b9630f", 0.99897),
+        TextEncoderBuild("Huihui abliterated, fp8", "ahmed22xa/Huihui-Qwen3-VL-4B-Instruct-abliterated-comfy",
+                         "Huihui-Qwen3-VL-4B-Instruct-abliterated-fp8_scaled.safetensors", 5.24,
+                         "45fe15d359fbc6fe8773f24cebc34acedf5696d96d41a0c9a3039611ece3b866", 0.99532, variant=True,
+                         note="an abliterated fine-tune of Qwen3-VL-4B (community build)"),
+        TextEncoderBuild("Huihui abliterated, bf16", "ahmed22xa/Huihui-Qwen3-VL-4B-Instruct-abliterated-comfy",
+                         "Huihui-Qwen3-VL-4B-Instruct-abliterated.safetensors", 8.88,
+                         "03590b45adf6a071dd5de231d4e2b697355746e36ce2d9368b4c0587ba014cd2", 0.99573, variant=True,
+                         note="an abliterated fine-tune of Qwen3-VL-4B (community build)"),
+    ),
     text_encoder_label="Qwen3-VL-4B",
     vae_label="Qwen-Image VAE",
 
@@ -90,17 +110,30 @@ KREA2 = FamilyDescription(
     precisions=("int8", "nf4", "bf16"),
     auto_precisions=("int8", "nf4"),
     compiles=True,
+    compile_hint=(
+    "Auto (recommended) turns torch.compile on only when this run is long enough to repay it. "
+    "It fuses the per-matmul quantise/dequantise work that bounds the INT8 and NF4 paths — "
+    "2.0× per step on INT8 (0.59 → 0.29 s/step, matching OneTrainer) and 1.28× on "
+    "NF4 (0.71 → 0.56) — but costs a ~90 s compile pause first, so a short run is SLOWER "
+    "overall. Break-even is around 600 steps on INT8, 1200 on NF4. NF4 + compile still fits a 16 GB "
+    "card (verified under a 13.5 GB cap). INT8 + compile fits from ~22 GB free: at high resolution "
+    "the checkpoint automatically moves outside the compiled region, which keeps memory at eager "
+    "levels (~18 GB at 1024px, measured ~27% faster than uncompiled). Requires Triton and, on "
+    "Windows, a C++ compiler (VS Build Tools) — both located automatically. Never used with "
+    "Blocks Swap, since swapping moves weights and compiled graphs assume they stay put."),
     preview_image=True,
     preview_checkpoint_sampling=SamplingSettings(
         "Turbo checkpoint", steps=8, cfg=1.0, sampler="euler", scheduler="simple", options=(("mu", 1.15),),
         note="The distilled Turbo: CFG-free, mu pinned at 1.15, as the original workbench.",
         source="the original Krea 2 workbench engine (removed with the original family)"),
+    int8_attention=True,              # workbench renders: comfy-kitchen's INT8 attention
+    activation_cache=True,            # Turbo Preview: step-1 replay, identical to a full render
     finetune=True,
-    workbench=("repair", "explorer", "profiler", "extract", "royale"),
+    workbench=("repair", "profiler", "extract", "royale"),
     # the text-fusion boosts (15 Sep 2026, #137): the four text-fusion blocks at x2 / x3, everything else untouched.
     # Measured across several LoRAs, x3 lifted the detail metric ~72 -> ~77 and likeness 2-7 points on every LoRA but
     # an overtrained one, composition unchanged
-    repair_presets=tuple((f"✨Text fusion ×{m} (experimental)",
+    repair_presets=tuple((f"✨Text fusion ×{m}",
                           tuple((f"txt_{s}_{i}", float(m)) for s in ("lw", "rf") for i in range(2)))
                          for m in (2, 3)),
     # The original's measured 0.25 MP peaks (utils/capabilities.py: 5090, batch 1, rank 32; 0.42 GB saved per swapped
@@ -108,8 +141,17 @@ KREA2 = FamilyDescription(
     # +2.9 GB (15.3 -> 18.2 GB whole-GPU; the original grows +2.6 on the same data), NF4 13.3 GB at 1 MP under a
     # 16 GB card. The original's +0.25 GB/MP under-plans 1 MP: INT8 + 16 swapped blocks ran out on a 12 GB card.
     # bf16: measured on the driver, rank 8, 0.25 MP, 26.0 GB; its 1 MP point carries INT8's growth.
-    train_memory={"int8": (((0.25, 16.2), (1.0, 19.1)), 0.42), "nf4": (((0.25, 11.4), (1.0, 13.4)), 0.0),
+    # NF4 at 1 MP is 15.0: rank 16 with previews on peaked 14.9 training / 15.2 previewing on a simulated 16 GB card
+    # (#185, 11 Oct 2026) - the old 13.4 (rank 8, previews off) put 16 GB cards on NF4 at 1 MP and filled them;
+    # INT8 + 16 swapped blocks peaked 12.7 / 12.9 on the same run
+    train_memory={"int8": (((0.25, 16.2), (1.0, 19.1)), 0.42), "nf4": (((0.25, 11.4), (1.0, 15.0)), 0.0),
                   "bf16": (((0.25, 26.0), (1.0, 28.9)), 0.84)},
+    # without gradient checkpointing: reserved peaks, compiled, ranks 8-16, previews on, RTX PRO 6000 (24 Oct 2026 night; the 2.0 points on real 2 MP photos)
+    train_memory_nogc={"int8": ((0.25, 23.2), (0.37, 26.8), (0.5, 30.4), (0.75, 37.6), (1.05, 44.9), (1.5, 57.7), (2.0, 69.9)),
+                       "bf16": ((0.25, 34.4), (0.37, 38.1), (0.5, 41.8), (0.75, 49.2), (1.05, 56.9), (1.5, 69.8), (2.0, 82.4))},
+    # partial checkpointing (quant.plan_partial_checkpointing): every block checkpointed (outside the graph), GB per
+    # block without it = the larger of the half-off and all-off slopes; RTX PRO 6000, previews on, 24 Oct 2026
+    train_memory_partial={"int8": (28, ((1.0, 18.2, 0.96), (1.5, 19.2, 1.38), (2.0, 20.4, 1.78)))},
     optimizers=("adamw8bit", "adamw"),
     # the original's Automagic setup (Peter, 17 Sep 2026): the 264 Linears converge at very different speeds, and the
     # text-fusion stack (under-trained by the recipe) is the minority one shared rate outvotes; a 16-step sign window
@@ -145,8 +187,12 @@ KREA2 = FamilyDescription(
         ),
     ),
     preview_speed_lora="Krea 2 Turbo LoRA (8-step)",
+    preview_speed_steps=10,
+    preview_speed_strength=0.7,       # Samples previews: Turbo 0.7, 10 steps, CFG 1 (Peter's setup)
     preview_steps=8,
     preview_cfg=1.0,
+    preview_negative=GENERAL_NEGATIVE,
+    text_cache_trim=True,
     preview_width=1024,
     preview_height=1024,
 
@@ -154,10 +200,10 @@ KREA2 = FamilyDescription(
         ("✨ Krea 2 Ultra Fast (rank 8, adaptive LR)", _preset(8, adaptive=("2e-4", "4e-4"))),
         ("✨ Krea 2 Standard (rank 32, full model)", _preset(32, epochs=64)),
         ("✨ Krea 2 Style (rank 16, gentle LR)", _preset(16, adaptive=("5e-5", "2e-4"), epochs=64)),
-        # Slider: hot and short, as Qwen's and the experiment/slider-training branch's Krea 2 Slider (rank 4, 2e-4,
+        # Slider: hot and short, as Qwen's and the experiment/slider-training branch's Krea 2 Slider (rank 8, 2e-4,
         # 0.5 MP). The loss watch and Adaptive LR are switched off for sliders by the trainer. 20 epochs: a happy/sad
         # prompt slider (16 practice pictures, guidance 2) was right at 20 and had turned +1 into an illustration by 25.
-        ("✨ Krea 2 Slider (rank 4, 2e-4)", _preset(4, lr=2e-4, epochs=20, slider=True, mp="0.5")),
+        ("✨ Krea 2 Slider (rank 8, 2e-4)", _preset(8, lr=2e-4, epochs=20, slider=True, mp="0.5")),
     ),
     notes=(
         ("Timesteps: logit-normal with a resolution-dependent shift (mu 0.5 at 256 image tokens to 1.15 at 6400), "

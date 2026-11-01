@@ -2,11 +2,11 @@
 
 [← Back to the README](../README.md)
 
-Qwen Image 2.1 trains LoRAs and LoKRs in Fizgig, including edit LoRAs learned from before/after pairs, with turbo previews during training, the per-image loss watch, and all five workbench tools (Repair Studio, LoRA the Explorer, Profiler, Extract, LoRA Royale). Saved LoRAs, LoKRs, Repair Studio saves and Extract outputs load in ComfyUI's standard LoRA loader. It's the first model on Fizgig's driver system.
+Qwen Image 2.1 trains LoRAs and LoKRs in Fizgig, including edit LoRAs learned from before/after pairs, with turbo previews during training, the per-image loss watch, and all four workbench tools (Repair Studio, Profiler, Extract, LoRA Royale). Saved LoRAs, LoKRs, Repair Studio saves and Extract outputs load in ComfyUI's standard LoRA loader. It's the first model on Fizgig's driver system.
 
 ## Getting set up
 
-1. On the **Preferences** tab, press **Download models for me** in the Qwen Image 2.1 section. It fetches the DiT, VAE, text encoder, the Fizgig training adapter and Viggle's turbo LoRA (about 34 GB), plus Krea 2's Qwen3-VL-4B captioner (about 5 GB) if you don't have it, and the tokenizer files so training works offline.
+1. On the **Preferences** tab, press **Download models for me** in the Qwen Image 2.1 section. It fetches the DiT, VAE, text encoder, the Fizgig training adapter, the Turbo LoRA and the Turbo DiT (about 41 GB), plus Krea 2's Qwen3-VL-4B captioner (about 5 GB) if you don't have it, and the tokenizer files so training works offline.
 2. On the **Training** tab, pick **Qwen Image 2.1** as the Base Model. The Fast preset loads on your first visit.
 
 ## The Fizgig training adapter
@@ -56,9 +56,11 @@ If a later epoch looks softer than you'd like, an earlier one is often the bette
 
 The text encoder only encodes, and loads in 8-bit below about 20 GB free (about 8 GB in all), which is what sets the 10 GB floor. On an RTX 5090 limited to 12 GB, the Fast preset trained on INT8 with a 9.9 GB peak, previews included; limited to 10 GB, on NF4 with a 7.3 GB peak.
 
-## Previews and the turbo LoRA
+## Previews and Turbo
 
-Training previews render on the plain model at **25 steps** by default, with the Samples tab's **Turbo strength** at 0. For faster previews, set Turbo strength to **1.0** and steps to **6**: that renders them with Viggle's turbo LoRA (set in Preferences). The training adapter is off for previews; a Context LoRA stays on.
+Training previews render with the **Turbo LoRA** at strength 1, **8 steps, CFG 1** (both set in Preferences; the download button fetches them). Ticking **Use the Turbo model for samples** on the Samples tab renders them on the Turbo DiT instead, with the model being trained parked beside it. Without the Turbo LoRA they render on the plain model at **25 steps, CFG 3**. The training adapter is off for previews; a Context LoRA stays on.
+
+Repair Studio and LoRA Royale preview on the Turbo DiT (8 steps, CFG 1) when it's set; without it they follow the Samples tab.
 
 ## Edit LoRAs
 
@@ -66,9 +68,9 @@ Qwen Image 2.1 is one model for text-to-image and editing, so a LoRA can learn a
 
 A film grade trained on 40 pairs: the original, the edit, and Fizgig's epoch 9 training preview.
 
-![Before edit](../assets/qwen_edit/1_before_edit.jpg)
-![After edit](../assets/qwen_edit/2_after_edit.jpg)
-![Fizgig's epoch 9 preview](../assets/qwen_edit/3_fizgig_epoch9_preview.png)
+![Before edit](assets/qwen_edit/1_before_edit.jpg)
+![After edit](assets/qwen_edit/2_after_edit.jpg)
+![Fizgig's epoch 9 preview](assets/qwen_edit/3_fizgig_epoch9_preview.png)
 
 **What you need:** about 40 pairs (20 at least; more if your photos vary a lot). Each photo 1 MP or larger, e.g. 1200×800; bigger is fine, Fizgig resizes them. An original and its edited version must have the same crop and shape.
 
@@ -77,6 +79,8 @@ A film grade trained on 40 pairs: the original, the edit, and Fizgig's epoch 9 t
 3. **Edited folder (after editing):** the same photos after your edit, with the same file names as the originals (`IMG_0001.jpg` in both), one edited photo per original. This is the same folder as on the Start tab.
 4. **Captions for the edited photos:** type what the edit is, e.g. "Apply my concert grade.", and press **Write captions**. It saves that text as the caption of every photo in the Edited folder.
 5. **Test photo for previews (optional):** an original photo that is in neither folder. The previews during training show the edit applied to it. Any size: it's fitted to the preview size automatically. Left empty, previews use the first original. Edit previews use your edit instruction as their prompt; the Samples tab's prompts aren't used while Edit LoRA is on.
+
+**Edits that bring in extra pictures.** An edit can also put something from other pictures into the photo: this person into that scene, this product on that table. Under **What the edit uses**, pick **The photo + extra pictures** and set the **Extra pictures folder** that appears as step 2. Name each extra picture after the photo it belongs to: `photo_1.png`, `photo_2.png` … for `photo.png`. They can be any shape, up to 9 per photo; only the original has to match the edited photo's crop. The line under the folder says how many photos it found extras for. The edit instruction then says what to do with them, e.g. "Put the person from the second picture into this scene."
 
 Start refuses to run if an edited photo has no original with the same file name, has no caption, or has a different crop or shape from its original.
 
@@ -88,7 +92,7 @@ In our tests, 40 pairs of a colour grade at 0.59 MP with rank 16 learned the gra
 
 A slider LoRA is a dial between two looks: strength +1 moves a picture toward one look (happy, warm), -1 toward the opposite (sad, cool), and anything in between gives a bit of either. Sliders are trained at +1 and -1, but most will also go further, so try 1.5 or 2 (or -1.5, -2) for a stronger effect; how far a slider goes before the picture breaks down varies from one to the next.
 
-On the Training tab, pick **Kind of LoRA: Slider** under Training Parameters, or load **✨ Qwen 2.1 Slider (rank 4, 2e-4)**, which selects it (rank 4, learning rate 2e-4, 30 epochs). Then choose where the two ends come from.
+On the Training tab, pick **Kind of LoRA: Slider** under Training Parameters, or load **✨ Qwen 2.1 Slider (rank 8, 2e-4)**, which selects it (rank 8, learning rate 2e-4, 30 epochs). Then choose where the two ends come from.
 
 **From photo pairs:** two folders of the same shots, one for each end of the dial. 4 to 10 pairs is enough.
 
@@ -103,10 +107,13 @@ Frame each pair the same way. Handheld shots from the same spot are fine; what m
 1. **What the picture is:** the start of the prompt. Each end's words are added after it with a space, so end it with a comma if you want one.
 2. **The +1 end adds** and **The -1 end adds:** e.g. "happy" and "sad".
 3. **Push strength:** how hard the two ends are pushed apart. 2 is a good start (values 2 to 9 tested); higher gives a stronger dial but can change more than the one thing you asked for.
+4. **Leave these alone** (optional): prompts the dial must not change, one a line. A LoRA doesn't know which prompt it's under, so a hair-length dial learned on women also lengthens men's hair; "a close-up photo of a man with short hair" here keeps men as they are. Each step checks one of them in turn (a step takes about half as long again), and the previews show the first one at -1 / 0 / +1 beside the dial, so you can see it stay put. **How firmly** (default 1) sets how much that counts against the dial: higher holds them tighter but can weaken the dial.
 
 Describe one person in the first line ("a close-up photo of a young woman with short dark hair,") and the dial changes her expression and keeps her the same. Keep it general ("a close-up photo of a person who is") and each practice picture shows a different person, so the dial learns only the change and works on anyone. Words like "sad" can bring more than a face (grey light, rain); if the whole scene changes, try a narrower word such as "unsmiling".
 
-**Previews** are strips of three pictures on one seed, at strength -1, 0 and +1. They use the slider's own prompt (the shared caption, or the "What the picture is" line); the Samples tab sets the seed, size and steps.
+**Steer it while it trains:** pushing one thing tends to drag others along (a "details" slider drifting toward realism, say). While a slider from prompts trains, the Training tab's **Slider prompts** panel has its three lines, the push strength and the prompts to leave alone: change them and press **Apply at the next epoch**, and it trains on toward the new ends from where it has got to, with no restart. A new "What the picture is" line renders new practice pictures first. A Pause and Resume keeps the latest, and the saved LoRA records every change and the epoch it came in.
+
+**Previews** are strips of three pictures on one seed, at strength -1, 0 and +1. They use the slider's own prompt (the shared caption, or the "What the picture is" line, the latest one if you change it while it trains); the Samples tab sets the seed, size and steps.
 
 Sliders are always a plain LoRA (a LoKR setting is switched to LoRA for the run), and Adaptive LR, EMA and the per-image loss watch are off for them. A Context LoRA works: the dial is learned on top of it, so use the slider with the same context LoRA at the same strength. In ComfyUI, load the slider like any LoRA and set its strength.
 
@@ -116,7 +123,7 @@ Qwen Image 2.1 is released under the Qwen Research License: non-commercial use o
 
 ## The per-image loss watch
 
-The four Training-tab toggles work on Qwen as on Krea 2 (see [Krea 2](KREA2.md)): problem-image detection, per-image LR, look-outlier warm-up, and auto-recaption. Auto-recaption uses the same Qwen3-VL-4B captioner as the Captions tab. Picking Automagic as the optimizer turns Adaptive LR, per-image LR and the look warm-up off, since Automagic sets its own rate; detection keeps running.
+The four Training-tab toggles work on Qwen as on Krea 2 (see [Krea 2](KREA2.md)): tracking how each image trains, per-image LR, look-outlier warm-up, and auto-recaption. Auto-recaption uses the same Qwen3-VL-4B captioner as the Captions tab. Picking Automagic as the optimizer turns Adaptive LR, per-image LR and the look warm-up off, since Automagic sets its own rate; detection keeps running.
 
 ## Command line
 

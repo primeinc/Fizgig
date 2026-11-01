@@ -302,8 +302,23 @@ def install_dependencies():
     from uv_install_deps import install_requirements
     if install_requirements(REQUIREMENTS_FILE, VENV_DIR, python_path):
         print("Dependencies installed successfully.")
+        install_linux_window(python_path)
         return True
     return False
+
+
+def install_linux_window(python_path):
+    """Linux: Qt WebEngine for the app window (launch_fizgig.sh). pywebview finds no engine inside the venv otherwise
+    (a distro's GTK bindings aren't visible there) and the web UI opens in the browser instead. Not in requirements.txt:
+    the pod image installs that and never opens a window. A failure here only means the browser."""
+    if platform.system() != "Linux":
+        return
+    print("Installing Qt for Fizgig's app window on Linux...")
+    r = subprocess.run([str(python_path), "-m", "uv", "pip", "install", "--python", str(python_path),
+                        "pywebview[qt]>=5,<7"])
+    if r.returncode != 0:
+        print("NOTE: Qt for the app window didn't install. launch_fizgig.sh will open Fizgig in your browser instead "
+              "(or use launch_fizgig_browser.sh).")
 
 
 def verify_cuda():
@@ -404,8 +419,8 @@ except Exception as e:
 def create_launcher_scripts():
     """Verify/create launcher scripts.
 
-    Windows: run_fizgig.bat ships WITH the repo (the consoleless chain: .bat -> run_silent.vbs
-    -> pythonw launch.pyw). This step used to overwrite it with an ancient console-attached
+    Windows: the launchers ship WITH the repo (Launch Fizgig.bat, the app window; Launch Fizgig in browser.bat, the web UI
+    with the browser opened on it; Launch Gizmo.bat). This step used to overwrite it with an ancient console-attached
     version (python + pause), which (a) gave every fresh install a lingering console window
     that ended in 'Press any key to continue', and (b) dirtied a tracked file so the next
     update_fizgig.bat's `git pull` refused to run. Never write it here.
@@ -413,7 +428,7 @@ def create_launcher_scripts():
     # Gizmo's launcher is the same story and gets the same treatment: tracked, verified, never
     # written. It needs no install of its own — Tkinter is stdlib, PIL and imageio-ffmpeg are
     # already pinned — so it simply arrives with an ordinary update.
-    for name in ("run_fizgig.bat", "Launch Gizmo (Video clip prep tool).bat"):
+    for name in ("Launch Fizgig.bat", "Launch Fizgig in browser.bat", "Launch Gizmo.bat"):
         bat_path = SCRIPT_DIR / name
         if bat_path.exists():
             print(f"Launcher present: {bat_path} (ships with the repo — not modified)")
@@ -421,20 +436,11 @@ def create_launcher_scripts():
             print(f"WARNING: {bat_path} is missing — restore it with "
                   f'`git checkout -- "{name}"`')
 
-    # Linux/Mac shell script (not shipped in the repo — generated here)
-    sh_content = '''#!/bin/bash
-cd "$(dirname "$0")"
-source venv/bin/activate
-python lora_trainer_gui.py
-'''
-
-    sh_path = SCRIPT_DIR / "run_fizgig.sh"
-    if not sh_path.exists():
-        with open(sh_path, 'w', newline='\n') as f:
-            f.write(sh_content)
-        if platform.system() != "Windows":
+    # Linux/Mac: launch_fizgig.sh, launch_fizgig_browser.sh and launch_gizmo.sh ship with the repo too
+    for name in ("launch_fizgig.sh", "launch_fizgig_browser.sh", "launch_gizmo.sh"):
+        sh_path = SCRIPT_DIR / name
+        if sh_path.exists() and platform.system() != "Windows":
             os.chmod(sh_path, 0o755)
-        print(f"Created: {sh_path}")
     return True
 
 
@@ -446,15 +452,16 @@ def print_summary():
     print("\nTo launch Fizgig:")
 
     if platform.system() == "Windows":
-        print(f"  Double-click: {SCRIPT_DIR / 'run_fizgig.bat'}")
-        print("  Or run: .\\run_fizgig.bat")
+        print(f"  Double-click: {SCRIPT_DIR / 'Launch Fizgig.bat'}  (its own window)")
+        print(f"  or {SCRIPT_DIR / 'Launch Fizgig in browser.bat'}  (in your web browser)")
     else:
-        print(f"  Run: ./run_fizgig.sh")
+        print("  Run: ./launch_fizgig.sh  (its own window)  or  ./launch_fizgig_browser.sh  (in your web browser)")
 
     print("\nFace Detection:")
     print("  - InsightFace models will download on first use (~300MB)")
     print("  - Uses CPU for detection (works on any GPU)")
     print("  - Supports gender classification for face filtering")
+    print("  - Furry / anime: pick a YOLO face model on the Image Prep tab (docs/FACE_BACKENDS.md)")
 
     print("\nAI Captioning (Florence-2):")
     print("  - Florence models auto-download from Hugging Face on first use")
