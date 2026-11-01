@@ -132,6 +132,7 @@ async function chooseFamily(key) {
     if (st && st.values && st.values[key]) S.all[key] = st.values[key];
   } catch (e) { /* keep what this page has */ }
   S.family = key;
+  S.mpFamily = key;
   S.fam = S.schema.families.find((f) => f.key === key);
   for (const sel of document.querySelectorAll(".family-pick")) sel.value = key;
   if (S.all[key]) {
@@ -937,250 +938,217 @@ async function renderPresets() {
   };
 }
 
-// ---- Preferences: compact model paths, driven by FamilyDescription metadata --------------------------------
-// One data source: /api/schema model_files + /api/prefs model_inventory. No second model catalog.
-const mpGiB = (bytes) => (Math.max(0, Number(bytes) || 0) / (1024 ** 3));
+// ---- Model library: one family at a time, built from canonical FamilyDescription metadata ------------------
+const mpGiB = (bytes) => Math.max(0, Number(bytes) || 0) / (1024 ** 3);
 const mpSize = (bytes, approx = false) => (approx ? "≈" : "") + mpGiB(bytes).toFixed(2) + " GB";
-const MP_ROLES = {dit: "DiT", preview_dit: "Preview", vae: "VAE", text_encoder: "Text",
+const MP_ROLES = {dit: "DiT", preview_dit: "Preview", vae: "VAE", text_encoder: "Text encoder",
   speed_lora: "LoRA", look_lora: "LoRA", training_adapter: "Adapter"};
-
 function mpChip(value, style = "") {
   return el("span", {class: "mp-chip" + (style ? " " + style : ""), text: value});
 }
-
-function mpModels(family) {
-  const entries = new Map((family.model_files || []).map((m) => [m.pref_key, m]));
-  return (family.model_keys || []).map((key) => [key, entries.get(key) ||
-    {pref_key: key, label: key, note: "Model path used by this family", size_gb: 0, required: false}]);
+function mpModels(f) {
+  const descriptions = new Map((f.model_files || []).map((m) => [m.pref_key, m]));
+  return (f.model_keys || []).map((key) => [key, descriptions.get(key) ||
+    {pref_key: key, label: key, note: "Model used by this training family.", required: false}]);
 }
-
 function mpStat(key) {
-  return S.modelInventory?.files?.[key] || {exists: false, configured: !!S.prefs[key],
-    bytes: 0, expected_bytes: 0, required: false};
+  return S.modelInventory?.files?.[key] || {exists: false, bytes: 0, expected_bytes: 0,
+    configured: !!S.prefs[key], required: false};
 }
-
-function mpHelp(description, source, altSource) {
+function mpHelp(description, model = null) {
   const content = el("div", {class: "mp-help-content"},
-    el("div", {text: description || "Model file used by this training family."}));
-  if (source?.repo && source.path) content.append(
-    el("div", {class: "mp-help-source", text: "Source: " + source.repo + " / " + source.path}),
-    el("a", {target: "_blank", rel: "noopener", href: "https://huggingface.co/" + source.repo +
-      "/blob/main/" + source.path, text: "Official file ↗"}));
-  if (altSource) content.append(el("div", {class: "mp-help-source", text: altSource}));
+    el("p", {text: description || "See the model's official card for more information."}));
+  if (model?.repo && model.path) content.append(
+    el("div", {class: "mp-help-source", text: model.repo + " / " + model.path}),
+    el("a", {target: "_blank", rel: "noopener", href: "https://huggingface.co/" +
+      model.repo + "/blob/main/" + model.path, text: "Official model file ↗"}));
+  if (model?.alt_repo && model.alt_path) content.append(
+    el("div", {class: "mp-help-source", text: "Alternative: " + model.alt_repo + " / " + model.alt_path}),
+    el("a", {target: "_blank", rel: "noopener", href: "https://huggingface.co/" +
+      model.alt_repo + "/blob/main/" + model.alt_path, text: "Alternative build ↗"}));
   return el("details", {class: "mp-help"},
-    el("summary", {class: "mp-help-button", title: "Details (hover, focus or click)",
-      "aria-label": "Read model details"}, "?"), content);
+    el("summary", {class: "mp-help-button", title: "Model information (hover or click)",
+      "aria-label": "Model information"}, "?"), content);
 }
-
-function mpRefresh() {
-  return api("/api/prefs").then((pr) => {
-    S.prefs = pr.models || {};
-    S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
-    renderPrefs();
-    checkModels();
-    refreshStateSoon();
-    captionModelsChanged();
-  });
+async function mpRefresh() {
+  const pr = await api("/api/prefs");
+  S.prefs = pr.models || {};
+  S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
+  renderPrefs();
+  checkModels();
+  refreshStateSoon();
+  captionModelsChanged();
 }
-
-function mpRow(family, key, m) {
-  const st = mpStat(key), path = String(S.prefs[key] || "");
-  const state = st.exists ? "ready" : path.trim() ? "stale" : "missing";
-  const statusLabel = st.exists ? (st.directory ? "Model folder available" : "On disk") :
-    path.trim() ? "Path not found" : "Not configured";
+function mpRow(f, key, m) {
+  const st = mpStat(key), raw = String(S.prefs[key] || "");
+  const state = st.exists ? "ready" : raw.trim() ? "stale" : "missing";
   const label = m.label || key;
-  const input = el("input", {type: "text", class: "w-path mp-path-input", value: path,
-    "aria-label": label + " file path", spellcheck: "false", title: path || "Choose a model file"});
-  const saveStatus = el("div", {class: "mp-save-error", role: "status"});
-  let pendingSave = Promise.resolve();
-  const clearBtn = el("button", {class: "btn btn-sm", text: "Clear", disabled: !path.trim(),
-    title: "Clear this one saved path. The file is not deleted.", onclick: () => savePath("")});
+  const input = el("input", {type: "text", class: "w-path mp-path-input", value: raw,
+    "aria-label": label + " model path", title: raw || "No model path selected",
+    placeholder: "No model selected", spellcheck: "false"});
+  const message = el("span", {class: "mp-save-error", role: "status"});
+  let pending = Promise.resolve();
+  const clear = el("button", {class: "btn btn-sm", text: "Clear", disabled: !raw.trim(),
+    title: "Clear the saved path. The model file stays on disk.", onclick: () => savePath("")});
   const savePath = (value) => {
     const next = String(value || "").trim();
-    input.value = next;
-    input.title = next || "Choose a model file";
-    S.prefs[key] = next;
-    clearBtn.disabled = !next;
-    pendingSave = pendingSave.then(async () => {
+    input.value = next; input.title = next || "No model selected";
+    clear.disabled = !next; S.prefs[key] = next;
+    pending = pending.then(async () => {
       try {
         await api("/api/prefs", {changes: {[key]: next}});
-        saveStatus.textContent = "";
         await mpRefresh();
-      } catch (error) { saveStatus.textContent = "Could not save: " + error.message; }
+      } catch (error) { message.textContent = "Not saved: " + error.message; }
     });
-    return pendingSave;
+    return pending;
   };
-  input.addEventListener("input", () => { clearBtn.disabled = !input.value.trim(); });
+  input.addEventListener("input", () => { clear.disabled = !input.value.trim(); });
   input.addEventListener("change", () => savePath(input.value));
-
-  const sourceNote = [m.hint || m.note, m.download_note].filter(Boolean).join("\n");
-  const alternative = m.alt_repo && m.alt_path ?
-    ("Alternative build: " + m.alt_repo + " / " + m.alt_path + (m.alt_note ? " — " + m.alt_note : "")) : "";
-  const info = el("div", {class: "mp-row-info"},
-    el("span", {class: "mp-dot " + state, title: statusLabel, "aria-label": statusLabel,
-      text: st.exists ? "✓" : state === "stale" ? "!" : "○"}),
-    el("span", {class: "mp-row-name", text: label, title: label}),
-    mpHelp(sourceNote, m, alternative),
-    mpChip(MP_ROLES[m.role] || "Model", "role"),
-    ...(!m.required ? [mpChip("Optional", "optional")] : []),
-    ...(Number(m.size_gb) > 0 ? [mpChip("≈" + Number(m.size_gb).toFixed(2) + " GB")] : []));
+  const statusName = st.exists ? "Ready" : state === "stale" ? "Missing file" : "Not selected";
+  const status = mpChip(statusName, state);
+  const role = MP_ROLES[m.role] || "Model";
   const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
   const fileNames = [m.local_name || (m.path || "").split("/").pop(),
     m.alt_path ? m.alt_path.split("/").pop() : ""].filter(Boolean);
   (S.mpRows[key] ||= []).push({node: progress, filenames: fileNames});
-  const status = el("span", {class: "mp-row-size " + state,
-    text: st.exists ? (st.directory ? "Model folder ready · size not measured" :
-      mpSize(st.bytes) + " on disk") : state === "stale" ? "Path missing" : "Not on disk"});
-  const controls = el("div", {class: "mp-row-controls"},
-    el("button", {class: "btn btn-sm", text: "Choose…",
-      title: "Pick a model file on the Fizgig computer", onclick: () =>
-        pick(input.value, false, (picked) => { input.value = picked; savePath(picked); })}),
-    clearBtn);
-  if (m.repo && m.path) controls.append(el("a", {class: "btn btn-sm", target: "_blank",
-    rel: "noopener", title: "Open the official model file on Hugging Face (not a background download)",
-    href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path, text: m.download_label || "Source ↗"}));
-  if (m.alt_repo && m.alt_path) controls.append(el("a", {class: "btn btn-sm",
-    target: "_blank", rel: "noopener", title: "Alternative model file on Hugging Face",
-    href: "https://huggingface.co/" + m.alt_repo + "/blob/main/" + m.alt_path,
-    text: m.alt_label || "Alt ↗"}));
-  return el("div", {class: "mp-file", "data-status": state, "data-key": key},
-    info,
-    el("div", {class: "mp-path-line"}, input, controls),
-    el("div", {class: "mp-file-footer"}, status, progress, saveStatus));
+  const sourceInfo = [m.hint || m.note || "", m.download_note || ""].filter(Boolean).join("\n");
+  const name = el("div", {class: "mp-model-heading"},
+    el("div", {class: "mp-model-name"}, el("b", {text: label}), mpHelp(sourceInfo, m)),
+    el("div", {class: "mp-model-badges"}, status, mpChip(role),
+      ...(!m.required ? [mpChip("Optional", "optional")] : [])));
+  const diskSize = st.exists ?
+    (st.directory ? "Model folder ready · size unmeasured" : mpSize(st.bytes) + " on disk") :
+    state === "stale" ? "Saved path no longer exists" : "No local model selected";
+  const catalogSize = m.size_gb ? "Catalog estimate " + Number(m.size_gb).toFixed(2) + " GB" : "";
+  const meta = el("div", {class: "mp-model-meta"},
+    el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
+    ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, message);
+  const actions = el("div", {class: "mp-model-actions"},
+    el("button", {class: "btn btn-sm", text: "Choose…", title: "Choose a local model file", onclick: () =>
+      pick(input.value, false, (picked) => savePath(picked))}), clear);
+  if (m.repo && m.path) actions.append(el("a", {class: "btn btn-sm",
+    target: "_blank", rel: "noopener", href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path,
+    text: "Download ↗", title: "Open the official download page; does not start a background download"}));
+  return el("article", {class: "mp-model-row", "data-key": key, "data-status": state,
+    "data-optional": m.required ? "0" : "1",
+    "data-search": [label, key, raw, m.path || ""].join(" ").toLowerCase()},
+    name, el("div", {class: "mp-model-inputs"}, input, actions), meta);
 }
-
-function mpOptionalPanel(families) {
-  const items = [];
+function mpOptionalPanel(f) {
+  const alternatives = (f.model_files || []).filter((m) => m.alt_repo && m.alt_path);
+  if (!alternatives.length) return null;
+  const detail = el("details", {class: "mp-alternatives"},
+    el("summary", {text: "Alternative model builds (" + alternatives.length + ")"}));
+  for (const m of alternatives) detail.append(el("div", {class: "mp-alternative"},
+    el("span", {text: m.label + ": " + (m.alt_label || m.alt_path.split("/").pop())}),
+    el("a", {href: "https://huggingface.co/" + m.alt_repo + "/blob/main/" + m.alt_path,
+      rel: "noopener", target: "_blank", text: "View file ↗"})));
+  return detail;
+}
+function mpFamilySummary(f) {
+  const entries = mpModels(f);
+  const ready = entries.filter(([key]) => mpStat(key).exists).length;
   const seen = new Set();
-  for (const f of families) for (const m of f.model_files || []) {
-    const optional = !m.required && !!m.repo && !!m.path;
-    const alternate = !!m.alt_repo && !!m.alt_path;
-    if (!optional && !alternate) continue;
-    const key = f.key + ":" + m.pref_key;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    items.push({family: f, model: m, optional, alternate});
+  let disk = 0, remaining = 0;
+  for (const [key,m] of entries) {
+    const st = mpStat(key), same = m.same_as || key;
+    if (st.exists) {
+      if (!st.directory && st.path && !seen.has(st.path.toLowerCase())) {
+        seen.add(st.path.toLowerCase()); disk += st.bytes || 0;
+      }
+    } else if (m.required && !mpStat(same).exists && !seen.has("missing:" + same)) {
+      seen.add("missing:" + same); remaining += st.expected_bytes || 0;
+    }
   }
-  if (!items.length) return null;
-  const panel = el("details", {class: "mp-optional-panel"},
-    el("summary", {}, el("span", {class: "mp-optional-heading", text: "Optional models & alternative builds"}),
-      mpChip(items.length + " choices"), el("span", {class: "mp-expand-icon", text: "⌄"})));
-  const body = el("div", {class: "mp-optional-list"});
-  for (const {family: f, model: m, optional, alternate} of items) {
-    const kinds = [optional ? "Optional" : "", alternate ? "Alternate build" : ""].filter(Boolean).join(" · ");
-    body.append(el("div", {class: "mp-optional-entry"},
-      el("div", {class: "mp-optional-name"}, el("b", {text: m.label}), mpChip(kinds)),
-      el("span", {class: "mp-optional-description", text: f.display_name +
-        (alternate ? " · " + (m.alt_label || m.alt_path.split("/").pop()) : "")}),
-      el("button", {class: "btn btn-sm", text: "Show model", onclick: () => {
-        S.mpFamily = f.key; S.mpFilter = "all"; S.prefsOpen.add(f.key);
-        renderPrefs();
-        document.querySelector('[data-model-family="' + f.key + '"]')?.scrollIntoView({block: "nearest"});
-      }})));
-  }
-  panel.append(body);
-  return panel;
+  return {ready, total: entries.length, disk, remaining};
 }
-
-function mpToolbar(families) {
-  const summary = S.modelInventory?.summary || {};
-  const bar = el("div", {class: "mp-summary"},
-    mpChip((summary.found || 0) + " on disk", "ready"),
-    mpChip((summary.optional || 0) + " optional", "optional"),
-    mpChip(mpSize(summary.disk_bytes || 0) + " in model files"),
-    ...((summary.folder_count || 0) ? [mpChip(summary.folder_count + " folders · unmeasured")] : []),
-    mpChip(mpSize(summary.remaining_required_bytes || 0, true) + " required downloads left", "missing"));
-  const searchStatus = el("span", {class: "mp-search-status", role: "status"});
+function mpToolbar(families, f) {
+  const totals = mpFamilySummary(f);
+  const searchStatus = el("div", {class: "mp-search-status", role: "status"});
   S.mpSearchStatus = searchStatus;
-  const actions = el("div", {class: "mp-toolbar-actions"},
-    el("button", {class: "btn", text: "Search locally", title: "Scan saved search roots; never downloads",
-      onclick: () => startModelSearch("")}),
-    el("button", {class: "btn btn-accent", text: "Download options",
-      title: "Open the current family's download controls; does not download immediately",
-      onclick: () => {
-        const chosen = families.some((f) => f.key === S.mpFamily) ? S.mpFamily :
-          families.some((f) => f.key === S.family) ? S.family : families[0]?.key;
-        if (!chosen) return;
-        S.mpFamily = chosen;
-        S.mpFilter = "all";
-        S.prefsOpen.add(chosen);
-        renderPrefs();
-        const panel = document.querySelector('[data-model-family="' + chosen + '"] .mp-download-panel');
-        if (panel) { panel.open = true; panel.scrollIntoView({block: "nearest"}); }
-      }}));
+  const selector = el("select", {class: "mp-family-filter", "aria-label": "Model family",
+    onchange: (e) => { S.mpFamily = e.target.value; S.mpFilter = "all"; S.mpQuery = ""; renderPrefs(); }},
+    ...families.map((d) => el("option", {value: d.key, text: d.display_name})));
+  selector.value = f.key;
+  const summary = el("div", {class: "mp-summary"},
+    el("div", {class: "mp-metric"}, el("strong", {text: totals.ready + " / " + totals.total}),
+      el("small", {text: "models ready"})),
+    el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.disk)}),
+      el("small", {text: "model files on disk"})),
+    el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.remaining, true)}),
+      el("small", {text: "required downloads left"})));
   const top = el("div", {class: "mp-workspace-head"},
-    el("div", {}, el("h2", {text: "Model Paths"}), el("p", {text: "Reuse existing model files; configure training, captioning and previews."})), actions);
-  const filters = [{id: "all", name: "All"}, {id: "ready", name: "On disk"},
-    {id: "missing", name: "Missing"}, {id: "optional", name: "Optional"}];
-  const pills = filters.map(({id, name}) => el("button",
-    {class: "mp-filter" + (S.mpFilter === id ? " active" : ""),
-      "aria-pressed": S.mpFilter === id ? "true" : "false", text: name, onclick: () => {
-        S.mpFilter = id; renderPrefs();
-      }}));
-  const select = el("select", {class: "mp-family-filter", "aria-label": "Filter model family",
-    onchange: (e) => { S.mpFamily = e.target.value; renderPrefs(); }},
-    el("option", {value: "*", text: "All model families"}),
-    ...families.map((f) => el("option", {value: f.key, text: f.display_name})));
-  select.value = S.mpFamily || "*";
-  const optional = mpOptionalPanel(families);
-  const root = el("section", {class: "mp-workspace"}, top, bar, searchStatus,
-    optional,
-    el("div", {class: "mp-filters"}, el("div", {class: "mp-pills"}, ...pills), select));
-  return root;
+    el("div", {class: "mp-title-stack"}, el("h2", {text: "Model library"}),
+      el("p", {text: "One family at a time. Reuse local files before downloading anything."})),
+    el("div", {class: "mp-toolbar-actions"},
+      el("button", {class: "btn", text: "Search locally", title: "Search all saved model directories; no downloads",
+        onclick: () => startModelSearch("")}),
+      el("button", {class: "btn btn-primary", text: "Download missing…",
+        title: "Open the existing family download controls; does not start a download",
+        onclick: () => {
+          const panel = document.querySelector(".mp-download-panel");
+          if (panel) { panel.open = true; panel.scrollIntoView({block: "nearest"}); }
+        }})));
+  const filterRow = el("div", {class: "mp-filter-row"},
+    el("label", {class: "mp-selector-label"}, el("span", {text: "Model family"}), selector),
+    el("div", {class: "mp-filter-actions"}));
+  const filterHost = filterRow.querySelector(".mp-filter-actions");
+  const search = el("input", {type: "search", value: S.mpQuery || "", class: "mp-search",
+    placeholder: "Filter models by name or file…", "aria-label": "Filter model list"});
+  const applyFilter = () => {
+    const query = (S.mpQuery || "").toLowerCase().trim();
+    const rows = [...document.querySelectorAll(".mp-model-row")];
+    let shown = 0;
+    for (const row of rows) {
+      const filter = S.mpFilter || "all";
+      const visible = (!query || row.dataset.search.includes(query)) &&
+        (filter === "all" || (filter === "ready" && row.dataset.status === "ready") ||
+          (filter === "missing" && row.dataset.status !== "ready") ||
+          (filter === "optional" && row.dataset.optional === "1"));
+      row.hidden = !visible;
+      if (visible) shown++;
+    }
+    const empty = document.querySelector(".mp-no-results");
+    if (empty) empty.hidden = shown > 0;
+  };
+  search.addEventListener("input", () => { S.mpQuery = search.value; applyFilter(); });
+  const filters = [["all","All"], ["ready","Ready"], ["missing","Missing"], ["optional","Optional"]];
+  for (const [key,label] of filters) filterHost.append(el("button", {
+    class: "mp-filter" + ((S.mpFilter || "all") === key ? " active" : ""),
+    "aria-pressed": (S.mpFilter || "all") === key ? "true" : "false", text: label, onclick: () => {
+      S.mpFilter = key; renderPrefs();
+    }}));
+  filterRow.append(search);
+  return el("section", {class: "mp-workspace"}, top, el("div", {class: "mp-toolbar-filter"}, filterRow),
+    summary, searchStatus);
 }
-
 function mpFamilyCard(f) {
-  if (S.mpFamily !== "*" && S.mpFamily !== f.key) return null;
-  const entries = mpModels(f).filter(([key,m]) => {
-    const st = mpStat(key);
-    return S.mpFilter === "all" || (S.mpFilter === "ready" && st.exists) ||
-      (S.mpFilter === "missing" && !st.exists) ||
-      (S.mpFilter === "optional" && !m.required);
-  });
-  if (!entries.length) return null;
-  const stats = entries.map(([key]) => mpStat(key));
-  const ready = stats.filter((s) => s.exists).length;
-  const disk = stats.reduce((sum, s) => sum + (s.exists ? s.bytes : 0), 0);
-  const remaining = entries.reduce((sum, [key, m]) => {
-    const st = mpStat(key);
-    return sum + (!st.exists && m.required ? st.expected_bytes : 0);
-  }, 0);
-  const expanded = S.prefsOpen.has(f.key);
-  const contents = el("div", {class: "card-content mp-family-body" + (expanded ? "" : " collapsed")});
-  if (f.prefs_intro) contents.append(el("div", {class: "mp-family-intro"}, mpHelp(f.prefs_intro)));
-  for (const [key,m] of entries) contents.append(mpRow(f, key, m));
-  if (f.prefs_note) contents.append(el("div", {class: "mp-family-intro"}, mpHelp(f.prefs_note)));
+  const body = el("div", {class: "mp-model-list"});
+  for (const [key,m] of mpModels(f)) body.append(mpRow(f, key, m));
+  body.append(el("div", {class: "mp-no-results", text: "No matching model files.", hidden: true}));
   const fetchBox = fetchRow(f);
-  if (fetchBox) contents.append(el("details", {class: "mp-download-panel"},
-    el("summary", {text: "Download missing family models · options and progress"}), fetchBox));
-  const title = el("button", {class: "card-title mp-family-title", type: "button",
-    "aria-expanded": expanded ? "true" : "false",
-    onclick: () => {
-      const open = contents.classList.toggle("collapsed");
-      S.prefsOpen[open ? "delete" : "add"](f.key);
-      title.setAttribute("aria-expanded", open ? "false" : "true");
-    }},
-    el("span", {class: "mp-family-name", text: f.display_name, title: f.prefs_title || f.display_name}),
-    mpChip(ready + " / " + entries.length, ready === entries.length ? "ready" : "optional"),
-    mpChip(mpSize(disk) + " on disk"),
-    ...(remaining > 0 ? [mpChip(mpSize(remaining, true) + " missing", "missing")] : []),
-    el("span", {class: "mp-chevron", text: "⌄"}));
-  return el("div", {class: "section-card mp-family-card", "data-model-family": f.key}, title, contents);
+  const panel = fetchBox ? el("details", {class: "mp-download-panel"},
+    el("summary", {text: "Download missing models · configuration & progress"}),
+    fetchBox) : null;
+  return el("div", {class: "section-card mp-library-card", "data-model-family": f.key},
+    el("div", {class: "mp-library-caption"},
+      el("b", {text: f.display_name}),
+      el("span", {text: "Choose or clear a file path, or open its official download page. Nothing is deleted here."})),
+    body, mpOptionalPanel(f), panel);
 }
-
 function renderPrefs() {
   const host = $("prefsForm");
-  host.innerHTML = "";
-  S.mpFilter ||= "all";
-  S.mpFamily ||= "*";
-  S.prefsOpen ||= new Set([S.family]);
+  host.replaceChildren();
   S.fetchRows = {};
   S.mpRows = {};
   const families = S.schema.families.filter((f) => !f.prefs_skip);
-  host.append(mpToolbar(families));
-  const cards = families.map(mpFamilyCard).filter(Boolean);
-  host.append(...cards);
-  // Model-library configuration and the rest of Preferences keep their existing controls.
+  const selected = families.find((f) => f.key === S.mpFamily) ||
+    families.find((f) => f.key === S.family) || families[0];
+  if (selected) {
+    S.mpFamily = selected.key;
+    host.append(mpToolbar(families, selected), mpFamilyCard(selected));
+  }
+  // The global library search paths and preferred download folder remain intact.
   host.append(modelRootsCard(), modelDownloadCard());
   if (S.pod) host.append(podCard());
   host.append(webPortCard());
@@ -1199,10 +1167,22 @@ function renderPrefs() {
         renderPrefs();
       }})),
       el("div", {class: "field-hint", text: "Resets folder and inference settings, but keeps model files, passwords and the RunPod key."}))));
+  const rows = [...document.querySelectorAll(".mp-model-row")];
+  const query = (S.mpQuery || "").toLowerCase().trim();
+  let shown = 0;
+  for (const row of rows) {
+    const f = S.mpFilter || "all";
+    row.hidden = (!!query && !row.dataset.search.includes(query)) ||
+      (f === "ready" && row.dataset.status !== "ready") ||
+      (f === "missing" && row.dataset.status === "ready") ||
+      (f === "optional" && row.dataset.optional !== "1");
+    if (!row.hidden) shown++;
+  }
+  const empty = document.querySelector(".mp-no-results");
+  if (empty) empty.hidden = shown > 0;
   paintFetch();
   paintModelSearch();
 }
-
 // Search libraries on the Fizgig computer, not on the browser's host.
 function modelRootsCard() {
   const list = el("div"), status = el("div", {class: "field-hint"});
@@ -7209,6 +7189,8 @@ function capJobBody(extra = {}) {
 
 async function capRun(path, body) {
   try {
+    if (path === "/api/captions/ai" && S.cap.ruleSave && !(await S.cap.ruleSave))
+      throw new Error("Automatic corrections were not saved. Resolve the rule error before captioning.");
     const r = await api(path, body);
     if (r.error) $("capStatus").textContent = r.error;
     pollCaptions();
@@ -7285,6 +7267,7 @@ async function loadCaptions() {
   for (const id of ["dsZip", "dsZipCaps"]) $(id).style.display = S.imageFolder ? "" : "none";
   $("capFolder").textContent = (S.imageFolder ? `Folder: ${S.imageFolder}  (set on the Start tab)` :
     "Choose the training folder on the Start tab first.") + subfoldersHint();
+  if (S.cap.ruleConfig?.folder !== capFolder()) await loadCaptionRules();
   if (!S.imageFolder) { $("captionsSummary").textContent = "Choose the training folder on the Start tab."; return; }
   const ext = $("captionExt").value.trim() || ".txt";
   const r = await api(`/api/captions?folder=${encodeURIComponent(capFolder())}` +
@@ -7454,6 +7437,135 @@ async function capRemove(it, card, status) {
   } catch (e) { status.textContent = e.message; return false; }
 }
 
+// Automatic caption corrections are saved by absolute training-folder identity on the server.
+// They are separate from per-family form defaults, so Hannah's rules cannot leak to Amber's folder.
+S.cap.ruleConfig = {folder: "", enabled: false, rules: []};
+
+function renderCaptionRules() {
+  const folder = capFolder();
+  const cfg = S.cap.ruleConfig?.folder === folder ? S.cap.ruleConfig : {enabled: false, rules: []};
+  const rules = cfg.rules || [];
+  $("capRuleCount").textContent = rules.length + (rules.length === 1 ? " rule" : " rules");
+  $("capRulesEnabled").checked = !!cfg.enabled;
+  $("capRulesEnabled").disabled = !folder || !rules.length;
+  $("frAddRule").disabled = !folder;
+  const list = $("capRulesList");
+  list.replaceChildren();
+  if (!folder || !rules.length) {
+    list.append(el("div", {class: "cap-rule-empty", text: !folder ?
+      "Choose a training folder on Start to save its corrections." :
+      "No rules yet. Find and replace once with “Also save” checked, or save a pair below."}));
+    return;
+  }
+  rules.forEach((rule, index) => {
+    const on = el("input", {type: "checkbox", "aria-label": "Enable rule " + (index + 1)});
+    on.checked = rule.enabled !== false;
+    on.addEventListener("change", () => {
+      const next = rules.map((r, i) => i === index ? {...r, enabled: on.checked} : r);
+      persistCaptionRules({...cfg, rules: next});
+    });
+    const edit = el("button", {class: "btn btn-sm", text: "Edit",
+      title: "Copy this rule into Find & Replace so you can change it", onclick: () => {
+        $("frFind").value = rule.find; $("frReplace").value = rule.replace;
+        $("frWholeWord").checked = rule.whole_word !== false;
+        $("frFind").focus(); $("frFind").scrollIntoView({block: "nearest"});
+      }});
+    const move = (delta) => {
+      const target = index + delta;
+      if (target < 0 || target >= rules.length) return;
+      const next = rules.slice();
+      [next[index], next[target]] = [next[target], next[index]];
+      persistCaptionRules({...cfg, rules: next});
+    };
+    list.append(el("div", {class: "cap-rule-row"},
+      el("label", {class: "cap-rule-enable"}, on,
+        el("span", {class: "sr-only", text: "Enable rule"})),
+      el("div", {class: "cap-rule-pair"},
+        el("code", {text: rule.find}), el("span", {class: "cap-rule-arrow", text: "→"}),
+        el("code", {text: rule.replace || "(delete match)"}),
+        el("span", {class: "mp-chip", text: rule.whole_word === false ? "Any match" : "Whole words"})),
+      el("div", {class: "cap-rule-actions"},
+        edit,
+        el("button", {class: "btn btn-sm", text: "↑", title: "Move rule earlier",
+          "aria-label": "Move rule " + (index + 1) + " earlier", disabled: index === 0, onclick: () => move(-1)}),
+        el("button", {class: "btn btn-sm", text: "↓", title: "Move rule later",
+          "aria-label": "Move rule " + (index + 1) + " later", disabled: index === rules.length - 1,
+          onclick: () => move(1)}),
+        el("button", {class: "btn btn-sm", text: "Remove", title: "Remove this automatic rule only",
+          onclick: () => persistCaptionRules({...cfg, rules: rules.filter((_, i) => i !== index)})}))));
+  });
+}
+
+async function loadCaptionRules() {
+  const folder = capFolder();
+  if (!folder) {
+    S.cap.ruleConfig = {folder: "", enabled: false, rules: []};
+    renderCaptionRules();
+    return;
+  }
+  try {
+    const config = await api("/api/captions/rules?folder=" + encodeURIComponent(folder));
+    if (capFolder() !== folder) return;
+    S.cap.ruleConfig = {...config, folder};
+    $("capRulesStatus").textContent = "";
+  } catch (e) {
+    if (capFolder() !== folder) return;
+    S.cap.ruleConfig = {folder: "", enabled: false, rules: []};
+    $("capRulesStatus").textContent = "Could not load rules: " + e.message;
+  }
+  renderCaptionRules();
+}
+
+function persistCaptionRules(next) {
+  const folder = capFolder(), family = S.family;
+  const status = $("capRulesStatus");
+  if (!folder) { status.textContent = "Choose a training folder first."; return Promise.resolve(false); }
+  const intended = {...next, folder, enabled: !!next.enabled};
+  // Optimistic UI + serialized writes: rapid toggles/reordering cannot clobber
+  // one another, and a previous result must not undo a more recent click.
+  S.cap.ruleConfig = intended;
+  renderCaptionRules();
+  status.textContent = "Saving…";
+  const write = async () => {
+    try {
+      const result = await api("/api/captions/rules", {family, folder,
+        enabled: intended.enabled, rules: intended.rules});
+      if (capFolder() === folder && S.cap.ruleConfig === intended) {
+        S.cap.ruleConfig = {...result, folder};
+        status.textContent = "Saved for this training folder.";
+        renderCaptionRules();
+      }
+      return true;
+    } catch (e) {
+      if (capFolder() === folder) status.textContent = "Rules not saved: " + e.message;
+      return false;
+    }
+  };
+  S.cap.ruleSave = (S.cap.ruleSave || Promise.resolve()).then(write, write);
+  return S.cap.ruleSave;
+}
+
+async function rememberCaptionRule() {
+  const find = $("frFind").value.trim(), replace = $("frReplace").value;
+  const status = $("capRulesStatus");
+  if (!find) { status.textContent = "Enter text to find first."; return false; }
+  const folder = capFolder();
+  if (!folder) { status.textContent = "Choose a training folder first."; return false; }
+  if (S.cap.ruleConfig?.folder !== folder) await loadCaptionRules();
+  const cfg = S.cap.ruleConfig;
+  if (cfg.folder !== folder) return false;
+  const whole_word = $("frWholeWord").checked;
+  const item = {find, replace, whole_word, enabled: true};
+  const rules = (cfg.rules || []).slice();
+  const existing = rules.findIndex((r) => r.find.toLowerCase() === find.toLowerCase() &&
+    r.whole_word !== false === whole_word);
+  if (existing >= 0) rules[existing] = item;
+  else rules.push(item);
+  const saved = await persistCaptionRules({rules, enabled: cfg.enabled || !cfg.rules.length});
+  if (saved) $("frStatus").textContent += " Saved to automatic corrections.";
+  return saved;
+}
+
 // Show all of a caption, with the same literal match spans that the server will replace.
 // Build text nodes and marks, never HTML from user-provided caption contents.
 function captionMarkedSegments(segments, matchClass, label) {
@@ -7479,7 +7591,10 @@ async function findReplace(apply) {
       el("span", {class: "checkpoint-name", text: c.name}),
       captionMarkedSegments(c.before_segments || [[c.old, false]], "caption-find-before", "Before: "),
       captionMarkedSegments(c.after_segments || [[c.new, false]], "caption-find-after", "After: ")));
-    if (apply) loadCaptions();
+    if (apply) {
+      loadCaptions();
+      if ($("frRemember").checked) await rememberCaptionRule();
+    }
   } catch (e) { $("frStatus").textContent = e.message; }
 }
 
@@ -7523,6 +7638,11 @@ function wireCaptions() {
   $("capStop").addEventListener("click", () => capRun("/api/captions/stop", {}));
   $("capUnload").addEventListener("click", () => capRun("/api/captions/unload", {}));
   $("frPreview").addEventListener("click", () => findReplace(false));
+  $("frAddRule").addEventListener("click", rememberCaptionRule);
+  $("capRulesEnabled").addEventListener("change", () => {
+    const cfg = S.cap.ruleConfig;
+    if (cfg?.folder === capFolder()) persistCaptionRules({...cfg, enabled: $("capRulesEnabled").checked});
+  });
   $("frAddPreview").addEventListener("click", () => addText(false));
   $("frAdd").addEventListener("click", () => addText(true));
   $("capView").addEventListener("change", () => { S.cap.page = 0; renderCaptions(); });

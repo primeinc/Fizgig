@@ -398,9 +398,11 @@ def _popen(cmd, prefs, stdin=False):
 
 
 def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_tokens, trigger, overwrite, clips,
-                only=None, photos=True, ext=".txt"):
+                only=None, photos=True, ext=".txt", replacement_rules=None):
     """Caption the folder's pictures (and clips) with Florence-2 or Qwen3-VL, or just `only` (a re-caption). The
     worker loads once and stays loaded for the next batch."""
+    from fizgig.caption_replace import normalized_saved_rules
+    replacement_rules = normalized_saved_rules(replacement_rules if replacement_rules is not None else [])
     if _busy():
         raise ValueError("A captioning job is already running. Stop it first.")
     if model == QWEN_MODEL and not captioner:
@@ -444,7 +446,7 @@ def ai_captions(prefs, captioner, folder, model, task_label, instruction, max_to
     except OSError:
         pass
     job = {"list_file": list_file, "max_new_tokens": int(max_tokens or 120), "trigger": trigger.strip(),
-           "stop_file": stop_file, "caption_ext": ext}
+           "stop_file": stop_file, "caption_ext": ext, "replacement_rules": replacement_rules}
     if model == QWEN_MODEL:
         instr = os.path.join(JOB_DIR, "instruction.txt")
         with open(instr, "w", encoding="utf-8") as f:

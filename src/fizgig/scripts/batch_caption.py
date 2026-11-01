@@ -191,6 +191,8 @@ def _run_job(state: CaptionState, job: dict) -> bool:
     trigger = (job.get("trigger") or "").strip()
     max_new_tokens = int(job.get("max_new_tokens") or 120)
     stop_file = (job.get("stop_file") or "").strip()
+    from fizgig.caption_replace import apply_recaption_rules, compile_saved_rules
+    replacement_rules = compile_saved_rules(job.get("replacement_rules", []))
     include_video = state.include_video
 
     images = _load_image_list(list_file)
@@ -236,7 +238,10 @@ def _run_job(state: CaptionState, job: dict) -> bool:
             if not caption:
                 print(f"FAIL: {base} (empty caption)", flush=True)
                 continue
-            _write_caption(path, caption, trigger, job.get("caption_ext") or ".txt")
+            # Correct only THIS AI-generated caption, before writing it. Previously
+            # existing captions skipped by the web controller are never reopened.
+            corrected = apply_recaption_rules(caption, replacement_rules)
+            _write_caption(path, corrected, trigger, job.get("caption_ext") or ".txt")
             print(f"OK: {base}", flush=True)
         except Exception as exc:
             print(f"FAIL: {base} ({exc})", flush=True)

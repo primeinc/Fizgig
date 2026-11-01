@@ -47,7 +47,7 @@ def test_preferences_model_path_rows_have_clear_actions():
         "function mpOptionalPanel(", 1)[0]
     assert 'text: "Clear"' in prefs_section
     assert 'onclick: () => savePath("")' in prefs_section
-    assert 'clearBtn);' in prefs_section
+    assert 'const clear = el("button"' in prefs_section
     assert "S.prefs[key] = next;" in prefs_section
     assert 'changes: {[key]: next}' in prefs_section
     caption_section = app.split("function captionerCard() {", 1)[1].split(

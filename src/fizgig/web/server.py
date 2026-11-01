@@ -1038,6 +1038,16 @@ def _plan(family_key, values, image_folder, resume="", ft_continue=None, models=
         trig.update({f"s{i}:": str(values.get(f"DOP_FOLDER_TRIGGER{i}") or "")
                      for i, f in enumerate(inputs.get("extra_folders") or [], start=2) if f})
     inputs["recaption_triggers"] = trig
+    # Caption rules saved for this training folder also repair stuck-image
+    # auto-recaptions. The legacy per-job Training box remains additive.
+    if image_folder and os.path.isdir(image_folder):
+        from fizgig.web import caption_rule_store
+        folder_rules = caption_rule_store.load(image_folder)
+        if folder_rules["enabled"] and any(rule["enabled"] for rule in folder_rules["rules"]):
+            inputs["recaption_replace_rules"] = json.dumps({
+                "saved_rules": folder_rules["rules"],
+                "legacy": str(inputs.get("recaption_replace_rules") or ""),
+            }, ensure_ascii=False)
     # a helper set to train a share: both halves keep gradient checkpointing, so they train with the same options
     inputs["keep_checkpointing"] = any(h.get("share") for h in (prefs.get("helpers") or []))
     if ft_continue:          # a paused fine-tune: from its checkpoint, for the rotations left (the cache is built)
@@ -3046,6 +3056,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(st)
         if path == "/api/trigger":                   # the training folder's trigger word
             return self.json({"word": folder_trigger((qs.get("folder") or [""])[0])})
+        if path == "/api/captions/rules":
+            from fizgig.web import caption_rule_store
+            try:
+                return self.json(caption_rule_store.load((qs.get("folder") or [""])[0]))
+            except (ValueError, OSError) as exc:
+                return self.json({"error": str(exc)}, 400)
         if path == "/api/fetch":
             return self.json(_fetch_status())
         if path == "/api/models/discover":
@@ -4337,6 +4353,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/trigger":
                 set_folder_trigger(str(b.get("folder") or ""), str(b.get("word") or ""))
                 return self.json({"ok": True})
+            if path == "/api/captions/rules":
+                from fizgig.web import caption_rule_store
+                try:
+                    _, folder, *_ = _caption_args(b)
+                    return self.json(caption_rule_store.save(
+                        folder, b.get("enabled"), b.get("rules")))
+                except (ValueError, OSError) as exc:
+                    return self.json({"error": str(exc)}, 400)
             if path == "/api/captions/ai":
                 prefs, folder, clips, photos, _ = _caption_args(b)
                 cap = captioner_for(prefs)
@@ -4345,11 +4369,14 @@ class Handler(BaseHTTPRequestHandler):
                 from fizgig.dataset import detail_crops     # the folder's files, or its largest detail crops
                 inside = {os.path.abspath(f) for f in captions.with_crops(folder)}
                 only = [p for p in (b.get("only") or []) if os.path.dirname(os.path.abspath(p)) in inside]
+                from fizgig.web import caption_rule_store
+                saved_rules = caption_rule_store.load(folder)
                 return self.json(captions.ai_captions(
                     prefs, cap if cap and os.path.isfile(cap) else "", folder, model, str(b.get("task") or ""),
                     str(b.get("instruction") or ""), int(b.get("max_tokens") or 120), str(b.get("trigger") or ""),
                     bool(b.get("overwrite")), clips, only=only or None, photos=photos,
-                    ext=captions.caption_ext(b.get("ext"))))
+                    ext=captions.caption_ext(b.get("ext")),
+                    replacement_rules=saved_rules["rules"] if saved_rules["enabled"] else []))
             if path.startswith("/api/studio/"):
                 try:
                     return self.json(_studio_post(path[len("/api/studio/"):], b))
