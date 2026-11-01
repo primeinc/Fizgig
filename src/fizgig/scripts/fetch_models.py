@@ -339,23 +339,32 @@ def _download_with_progress(w, models_dir, token, log):
     return held["path"]
 
 
-def find_weight(w, models_dir, prefs, scan_cache=None):
+def _configured_file(value, repo_dir=None):
+    """A saved Preferences model path is authoritative if its file exists.
+
+    Preferences may contain paths relative to Fizgig's repository; the downloader
+    runs in a subprocess and must resolve them exactly as the web app does.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = raw if os.path.isabs(raw) else os.path.join(repo_dir or REPO_DIR, raw)
+    return os.path.abspath(path) if os.path.isfile(path) else ""
+
+
+def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
     A user-picked alternate build and replacement for a retired filename are exceptions:
     the previous file must not suppress the newly chosen build.
     """
-    current = str(prefs.get(w.pref_key) or "").strip()
-    if current and getattr(w, "switch_from", "") and os.path.basename(current) == w.switch_from:
-        current = ""
-    if current and os.path.basename(current) in getattr(w, "replaces", ()):
-        current = ""
-    if current and os.path.isfile(current):
+    current = _configured_file(prefs.get(w.pref_key), repo_dir)
+    if current:
         return current
     other_key = getattr(w, "same_as", "")
     other = str(prefs.get(other_key) or "").strip() if other_key else ""
-    if other and os.path.isfile(other):
-        return other
+    if _configured_file(other, repo_dir):
+        return _configured_file(other, repo_dir)
     min_bytes = int(w.gb * 0.8 * 1024 ** 3)
     found = model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
                                          _valid_safetensors, min_bytes, cache=scan_cache)
@@ -372,7 +381,7 @@ def find_weight(w, models_dir, prefs, scan_cache=None):
     return None
 
 
-def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None):
+def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None, repo_dir=None):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
     # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
     min_bytes = int(w.gb * 0.8 * 1024 ** 3)
@@ -384,33 +393,21 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
     # bf16, Klein's fp8mixed text encoder instead of the full one, a community fine-tune — and
     # every one of those would have been "too small", silently re-downloaded, and the user's
     # path overwritten with ours.
-    current = str(prefs.get(w.pref_key) or "").strip()
-    if current and w.switch_from and os.path.basename(current) == w.switch_from:
-        log(f"  [pick] {w.pref_key}: {os.path.basename(current)} -> {w.filename} (your choice on the download card)")
-        current = ""
-    if current and os.path.basename(current) in w.replaces:
-        log(f"  [new]  {w.pref_key}: {os.path.basename(current)} is replaced by {w.filename}")
-        current = ""                             # an earlier version of ours: fetch the new one and point at it
-    if current and os.path.isfile(current):
-        if os.path.basename(current) != w.filename and w.switch_from:
-            log(f"  [keep] {w.pref_key} -> {os.path.basename(current)}: your own file, so {w.filename} was not "
-                "downloaded. To use the pick, clear that row in Preferences, then download again.")
-        elif os.path.basename(current) != w.filename:
-            log(f"  [keep] {w.pref_key} -> {os.path.basename(current)} (your own choice, not replacing it)")
-        else:
-            log(f"  [ok]   {w.filename} — already set up")
+    current = _configured_file(prefs.get(w.pref_key), repo_dir)
+    if current:
+        log(f"  [keep] {w.pref_key} -> {current} (existing configured model; no download)")
         return True
 
     # the same file set for another model (any name: the user's own copy, e.g. ComfyUI's renamed VAE): linked, not fetched
     same_as = getattr(w, "same_as", "")
     other = str(prefs.get(same_as) or "").strip() if same_as else ""
-    if other and os.path.isfile(other):
+    if _configured_file(other, repo_dir):
         log(f"  [have] {w.filename} — already set for another model ({os.path.basename(other)}), linking into "
             "Preferences")
-        prefs[w.pref_key] = other
+        prefs[w.pref_key] = str(prefs.get(same_as))
         return True
 
-    found = find_weight(w, models_dir, prefs, scan_cache=scan_cache)
+    found = find_weight(w, models_dir, prefs, scan_cache=scan_cache, repo_dir=repo_dir)
     if found is model_sources.AMBIGUOUS:
         log(f"  [ambiguous] {w.filename} — equally strong local files; choose the correct file in Preferences.")
         return False
@@ -604,7 +601,7 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
                     ok = False
                 continue
             if not fetch_weight(w, models_dir, prefs, token=token, log=log, dry_run=dry_run,
-                                scan_cache=scan_cache):
+                                scan_cache=scan_cache, repo_dir=repo_dir):
                 ok = False
         log("")
 
