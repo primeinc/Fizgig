@@ -31,6 +31,8 @@ import os
 import struct
 import sys
 
+from fizgig import model_sources
+
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 # Machine-readable progress for the GUI. Off by default so a terminal user keeps
@@ -193,6 +195,25 @@ def _described_helpers():
 DESCRIBED = _described_families()
 FAMILIES.update(DESCRIBED)
 
+def model_candidates(families=None, include_optional=True, choices=None):
+    """Path-backed weights from the ONE download catalog, shared with local model discovery.
+
+    A family can contain the same captioning weight as several others. Skip the by-name
+    strangers pack: it is not a path-backed model and is downloaded by its own handler.
+    """
+    selected = FAMILIES if families is None else families
+    seen = set()
+    for family in selected:
+        for original in FAMILIES.get(family, ()):
+            if not getattr(original, "pref_key", "") or (original.optional and not include_optional):
+                continue
+            w = _chosen(original, choices)
+            if w.pref_key in seen:
+                continue
+            seen.add(w.pref_key)
+            yield w
+
+
 # Loaded by name at runtime, so there is no pref to write — see the module docstring.
 TOOLS = [
     ("MiaoshouAI/Florence-2-base-PromptGen", 1.0, "Florence-2 captioner"),
@@ -318,6 +339,27 @@ def _download_with_progress(w, models_dir, token, log):
     return held["path"]
 
 
+def find_weight(w, models_dir, prefs):
+    """Resolve without downloading or mutating prefs, honouring existing explicit selections.
+
+    A user-picked alternate build and replacement for a retired filename are exceptions:
+    the previous file must not suppress the newly chosen build.
+    """
+    current = str(prefs.get(w.pref_key) or "").strip()
+    if current and getattr(w, "switch_from", "") and os.path.basename(current) == w.switch_from:
+        current = ""
+    if current and os.path.basename(current) in getattr(w, "replaces", ()):
+        current = ""
+    if current and os.path.isfile(current):
+        return current
+    other_key = getattr(w, "same_as", "")
+    other = str(prefs.get(other_key) or "").strip() if other_key else ""
+    if other and os.path.isfile(other):
+        return other
+    return model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
+                                        _valid_safetensors, int(w.gb * 0.8 * 1024 ** 3))
+
+
 def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
     dest = os.path.join(models_dir, w.filename)
@@ -357,9 +399,13 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
         prefs[w.pref_key] = other
         return True
 
-    if os.path.isfile(dest) and _valid_safetensors(dest, min_bytes):
-        log(f"  [have] {w.filename} — on disk, linking into Preferences")
-        prefs[w.pref_key] = dest
+    found = find_weight(w, models_dir, prefs)
+    if found is model_sources.AMBIGUOUS:
+        log(f"  [ambiguous] {w.filename} — equally strong local files; choose the correct file in Preferences.")
+        return False
+    if found:
+        log(f"  [have] {w.filename} — {found}, linking into Preferences")
+        prefs[w.pref_key] = found
         return True
 
     if dry_run:
@@ -502,7 +548,7 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
     if not dry_run:
         os.makedirs(models_dir, exist_ok=True)
     prefs = _load_prefs(prefs_file)
-    prefs_before = json.dumps(prefs, sort_keys=True)
+    prefs_before = dict(prefs)
 
     planned = [_chosen(w, choices) for fam in families if fam in FAMILIES for w in FAMILIES[fam]
                if include_optional or not w.optional]
@@ -542,8 +588,14 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
 
     # Only rewrite prefs.json if we actually changed something — a tools-only run has no paths
     # to record, and there's no reason to touch a user's settings file to say so.
-    if not dry_run and json.dumps(prefs, sort_keys=True) != prefs_before:
-        _save_prefs(prefs_file, prefs)
+    if not dry_run and prefs != prefs_before:
+        # Read again at commit time so model-search roots (or another explicit path) saved in
+        # Preferences while this long-running subprocess downloaded are not lost.
+        latest = _load_prefs(prefs_file)
+        missing = object()
+        latest.update({key: value for key, value in prefs.items()
+                       if value != prefs_before.get(key, missing)})
+        _save_prefs(prefs_file, latest)
         log(f"Preferences updated: {prefs_file}")
     log("Done." if ok else "Finished with some items missing — re-run to retry just those.")
     return ok

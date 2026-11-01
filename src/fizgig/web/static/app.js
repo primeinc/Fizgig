@@ -72,6 +72,7 @@ async function boot() {
   S.uploadRoot = await api("/api/upload/root").catch(() => null);   // before the forms: where Choose… starts
   const pr = await api("/api/prefs");
   S.prefs = pr.models || {};
+  S.modelRoots = pr.model_search_roots || [];
   S.captioner = pr.captioner;              // the secondary captioning model's row
   S.webPort = pr.web_port;
   S.portNow = pr.port_now;
@@ -117,7 +118,7 @@ async function boot() {
   phoneCard();
   podLocalInit();                                             // in the app window on a pod: this computer's folders
   welcomeShow(pr);
-  pollRun(); pollStats(); followLog();
+  pollRun(); pollStats(); followLog(); pollModelSearch();
   setInterval(pollRun, 2000); setInterval(pollStats, 2000); setInterval(loadGallery, 15000);
   setInterval(loadCheckpoints, 15000);
 }
@@ -943,6 +944,7 @@ function renderPrefs() {
   host.append(dataFolderCard());
   host.append(outputFolderCard());
   host.append(foldersCard());
+  host.append(modelRootsCard());
   host.append(inferenceCard());
   host.append(captionerCard());
   const gpuCard = gpuPickCard();
@@ -1006,6 +1008,105 @@ function renderPrefs() {
       el("div", {class: "field-hint", text: "Puts the folders and inference settings above back to Fizgig's defaults. " +
         "Model files, the web password and the RunPod key are kept."}))));
   paintFetch();
+}
+
+// Search libraries on the Fizgig computer, not on the browser's host.
+function modelRootsCard() {
+  const list = el("div"), status = el("div", {class: "field-hint"});
+  const field = el("input", {type: "text", class: "w-path",
+    placeholder: "Model library or application folder on the Fizgig computer"});
+  S.modelSearchMessage = status;
+  async function save(next) {
+    try {
+      await api("/api/prefs", {changes: {model_search_roots: next}});
+      S.modelRoots = (await api("/api/prefs")).model_search_roots || [];
+      draw();
+      status.textContent = "Model search folders saved.";
+    } catch (e) { status.textContent = e.message; }
+  }
+  const add = () => {
+    const p = field.value.trim();
+    if (!p) return;
+    if (!(S.modelRoots || []).includes(p)) save([...(S.modelRoots || []), p]);
+    else status.textContent = "This folder is already listed.";
+    field.value = "";
+  };
+  function draw() {
+    list.replaceChildren();
+    const roots = S.modelRoots || [];
+    if (!roots.length) list.append(el("div", {class: "field-hint",
+      text: "No custom folders yet. Fizgig also checks the Hugging Face cache, the Stability Matrix library and its own models folder."}));
+    roots.forEach((path, i) => {
+      const move = (other) => {
+        const next = roots.slice();
+        [next[i], next[other]] = [next[other], next[i]];
+        save(next);
+      };
+      list.append(el("div", {class: "field-row"},
+        el("span", {class: "field-hint", style: "overflow-wrap:anywhere;flex:1", text: path}),
+        el("button", {class: "btn btn-sm", text: "↑", title: "Search earlier", disabled: i === 0,
+          onclick: () => move(i - 1)}),
+        el("button", {class: "btn btn-sm", text: "↓", title: "Search later", disabled: i === roots.length - 1,
+          onclick: () => move(i + 1)}),
+        el("button", {class: "btn btn-sm", text: "Remove", onclick: () => save(roots.filter((_, n) => n !== i))})));
+    });
+  }
+  draw();
+  return el("div", {class: "section-card"},
+    el("div", {class: "card-title"}, el("span", {text: "Model search folders"})),
+    el("div", {class: "card-desc", text: "Add ComfyUI, SwarmUI, A1111/Forge, Fooocus, Stability Matrix or any model directory. " +
+      "These folders are searched in order. Existing model choices win. Search never downloads."}),
+    el("div", {class: "card-content"}, list,
+      el("div", {class: "field-row"}, field,
+        el("button", {class: "btn", text: "Choose…", onclick: () =>
+          pick(field.value, true, (path) => { field.value = path; add(); })}),
+        el("button", {class: "btn", text: "Add folder", onclick: add})),
+      el("div", {class: "field-row"},
+        el("button", {class: "btn btn-accent", text: "Search all models locally",
+          onclick: () => startModelSearch("")})), status));
+}
+
+function paintModelSearch() {
+  const st = S.modelSearch || {};
+  const msg = st.state === "running"
+    ? "Searching " + st.processed + " of " + st.total + " model files…"
+    : st.state === "done" ? "Found " + st.found + ", kept " + st.kept +
+        " selections, missing " + st.missing + ", ambiguous " + st.ambiguous +
+        ". No model files downloaded."
+      : st.state === "failed" ? "Search failed: " + st.error : "";
+  if (S.modelSearchMessage) S.modelSearchMessage.textContent = msg;
+  for (const [key, row] of Object.entries(S.fetchRows || {})) {
+    if (row.searchStatus) row.searchStatus.textContent = st.family === key ? msg : "";
+  }
+}
+
+async function pollModelSearch() {
+  clearTimeout(S.modelSearchTimer);
+  const was = S.modelSearch?.state;
+  try { S.modelSearch = await api("/api/models/discover"); } catch (e) { return; }
+  if (was === "running" && S.modelSearch.state === "done") {
+    const pr = await api("/api/prefs");
+    S.prefs = pr.models || {};
+    S.modelRoots = pr.model_search_roots || [];
+    renderPrefs();
+    checkModels();
+    refreshStateSoon();
+    captionModelsChanged();
+  }
+  paintModelSearch();
+  if (S.modelSearch.state === "running") S.modelSearchTimer = setTimeout(pollModelSearch, 1000);
+}
+
+async function startModelSearch(family, choices) {
+  try {
+    await api("/api/models/discover", {family, choices});
+    S.modelSearch = {state: "running", family, processed: 0, total: 0};
+    paintModelSearch();
+    pollModelSearch();
+  } catch (e) {
+    S.modelSearch = {state: "failed", family, error: e.message};
+    paintModelSearch();
+  }
 }
 
 // the secondary captioning model (#270): set, it captions everything (the Captions tab and auto-recaption);
@@ -1117,7 +1218,9 @@ function fetchRow(f) {
       watchFetch();
     } catch (e) { S.fetchError = {family: f.key, text: e.message}; paintFetch(); }
   }});
-  const line = el("div", {class: "field-row"}, btn);
+  const searchBtn = el("button", {class: "btn", text: "Search locally", title: "Reuse model weights without downloading",
+    onclick: () => startModelSearch(f.key, Object.fromEntries(picks.map((p) => [p.key, p.sel.value])))});
+  const line = el("div", {class: "field-row"}, searchBtn, btn);
   for (const p of picks) line.append(el("label", {class: "fetch-opt"}, p.label + ": ", p.sel));
   if (opt) line.append(el("label", {class: "fetch-opt"}, opt, " " + f.fetch_optional_label));
   box.append(line);
@@ -1138,7 +1241,10 @@ function fetchRow(f) {
     "the Captions tab uses and the small face and captioning models. Interrupted downloads resume where they left off."}));
   const status = el("div", {class: "fetch-status"});
   box.append(status);
-  S.fetchRows[f.key] = {status, btn};
+  const searchStatus = el("div", {class: "field-hint"});
+  box.append(searchStatus);
+  S.fetchRows[f.key] = {status, btn, searchStatus};
+  paintModelSearch();
   return box;
 }
 

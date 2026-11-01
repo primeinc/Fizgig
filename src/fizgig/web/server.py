@@ -2499,6 +2499,73 @@ _fetch = {"proc": None, "state": "idle", "family": "", "file": "", "done": 0, "t
           "then_start": None}           # (family, values, image folder): Start pressed before the model was here
 
 
+_model_search = {"state": "idle", "family": "", "processed": 0, "total": 0,
+                 "found": 0, "kept": 0, "missing": 0, "ambiguous": 0, "results": [], "error": ""}
+
+
+def _model_search_status():
+    with _lock:
+        return {**_model_search, "results": list(_model_search["results"])}
+
+
+def _start_model_search(family="", choices=None):
+    """Search local files on a worker without downloading; preserve explicit paths and edits."""
+    from fizgig.scripts import fetch_models
+    family = str(family or "").strip()
+    if family and family not in fetch_models.FAMILIES:
+        raise ValueError("Unknown model family.")
+    allowed = {f.pref_key for d in training_families() for f in d.model_files if f.fetch_choice}
+    choices = {str(k): v for k, v in (choices or {}).items() if k in allowed and v in ("main", "alt")}
+    weights = list(fetch_models.model_candidates((family,) if family else None, choices=choices))
+    with _lock:
+        if _model_search["state"] == "running":
+            raise ValueError("A local model search is already running.")
+        if _fetch["proc"] is not None and _fetch["proc"].poll() is None:
+            raise ValueError("A model download is running; search after it finishes.")
+        _model_search.update(state="running", family=family, processed=0, total=len(weights),
+                             found=0, kept=0, missing=0, ambiguous=0, results=[], error="")
+
+    def work():
+        prefs = load_prefs()
+        updates = {}
+        try:
+            for w in weights:
+                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs)
+                current = str(prefs.get(w.pref_key) or "").strip()
+                if result is fetch_models.model_sources.AMBIGUOUS:
+                    status, path = "ambiguous", ""
+                elif not result:
+                    status, path = "missing", ""
+                elif current and os.path.isfile(pref_path(prefs, w.pref_key)) and not (
+                        w.switch_from and os.path.basename(current) == w.switch_from) and (
+                        os.path.basename(current) not in w.replaces):
+                    status, path = "kept", current
+                else:
+                    status, path = "found", os.path.abspath(result)
+                    updates[w.pref_key] = path
+                with _lock:
+                    _model_search[status] += 1
+                    _model_search["processed"] += 1
+                    _model_search["results"].append({"key": w.pref_key, "status": status, "path": path})
+            if updates:
+                with _lock:
+                    latest = load_prefs()
+                    # A user who changed a path mid-search has final say.
+                    safe = {k: v for k, v in updates.items()
+                            if str(latest.get(k) or "").strip() == str(prefs.get(k) or "").strip()}
+                    if safe:
+                        latest.update(safe)
+                        _write_json(PREFS_FILE, latest)
+            with _lock:
+                _model_search["state"] = "done"
+        except Exception as e:
+            logger.exception("Local model discovery")
+            with _lock:
+                _model_search.update(state="failed", error=f"{type(e).__name__}: {e}")
+
+    threading.Thread(target=work, name="fizgig-model-discovery", daemon=True).start()
+
+
 def _only_downloads(desc, problems):
     """True when everything stopping a Start is this model's files not downloaded yet, all of which Download models
     for me fetches."""
@@ -2514,9 +2581,6 @@ def _fetch_then_start(desc, family, values, image_folder, problems):
         going = _run["proc"] is not None and _run["proc"].poll() is None or _run["state"] in ("starting", "running")
     if going:
         return {"error": "A run is already going. Stop or pause it first."}
-    if any(f.gated and f.repo for f in desc.model_files) and not os.environ.get("HF_TOKEN", "").strip():
-        return {"problems": problems + [f"{desc.display_name}'s files need a Hugging Face token: download them on the "
-                                        "Preferences tab (its Download models for me, with the token box there)."]}
     try:
         _start_fetch(desc.key)
     except ValueError as e:
@@ -2544,8 +2608,6 @@ def _start_fetch(family, token="", optional=False, choices=None):
     if desc is None:
         raise ValueError(f"Unknown family: {family}")
     token = (token or "").strip() or os.environ.get("HF_TOKEN", "").strip()
-    if any(f.gated and f.repo for f in desc.model_files) and not token:
-        raise ValueError(f"{desc.display_name}'s files need a Hugging Face token.")
     with _lock:
         if _fetch["proc"] is not None and _fetch["proc"].poll() is None:
             raise ValueError("A model download is already running.")
@@ -2584,6 +2646,17 @@ def _fetch_on_use(f):
 
     def work():
         try:
+            from fizgig.scripts import fetch_models
+            w = next((w for w in fetch_models.model_candidates() if w.pref_key == f.pref_key), None)
+            if w is not None:
+                found = fetch_models.find_weight(w, user_data.MODELS_DIR, load_prefs())
+                if found is fetch_models.model_sources.AMBIGUOUS:
+                    raise ValueError(f"Multiple local candidates for {f.pref_key}: choose one in Preferences")
+                if found:
+                    update_prefs({f.pref_key: str(found)})
+                    with _lock:
+                        _on_use[f.pref_key] = {"state": "done", "at": time.time()}
+                    return
             from fizgig.utils import hf_public
             got = hf_public.download(repo_id=f.repo, filename=f.path, local_dir=user_data.MODELS_DIR)
             dest = os.path.join(user_data.MODELS_DIR, f.local_name or os.path.basename(f.path))
@@ -2911,6 +2984,8 @@ class Handler(BaseHTTPRequestHandler):
             p = load_prefs()
             return self.json({"models": {k: str(p.get(k) or "") for d in training_families()
                                          for k in form.model_keys(d)},
+                              "model_search_roots": p.get("model_search_roots")
+                              if isinstance(p.get("model_search_roots"), list) else [],
                               "cache_dir": str(p.get("cache_dir") or ""),
                               "settings": {k: str(p.get(k) or "") for k in SETTING_PREFS},
                               "captioner": {"path": str(p.get(captions.SECONDARY_PREF) or ""),
@@ -2945,6 +3020,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"word": folder_trigger((qs.get("folder") or [""])[0])})
         if path == "/api/fetch":
             return self.json(_fetch_status())
+        if path == "/api/models/discover":
+            return self.json(_model_search_status())
         if path.startswith(("/api/helper/", "/api/helpers")):   # helpers: another Fizgig's GPU (web/helpers.py)
             from fizgig.web import helpers
             g = lambda k: (qs.get(k) or [""])[0]
@@ -4122,6 +4199,12 @@ class Handler(BaseHTTPRequestHandler):
                     _run["pause"] = True
                 append_log("\n⏸ Pause requested: the run stops cleanly at the end of this epoch.\n")
                 return self.json({"ok": True})
+            if path == "/api/models/discover":
+                try:
+                    _start_model_search(b.get("family"), b.get("choices") if isinstance(b.get("choices"), dict) else None)
+                    return self.json({"ok": True})
+                except ValueError as e:
+                    return self.json({"error": str(e)}, 400)
             if path == "/api/fetch":
                 _start_fetch(b.get("family", ""), b.get("token", ""), bool(b.get("optional")),
                              b.get("choices") if isinstance(b.get("choices"), dict) else None)
@@ -4154,6 +4237,22 @@ class Handler(BaseHTTPRequestHandler):
                     if k in ch:
                         ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
                 upd = {k: str(v) for k, v in ch.items() if k in allowed}
+                if "model_search_roots" in ch:
+                    roots = ch["model_search_roots"]
+                    if not isinstance(roots, list) or len(roots) > 24 or any(
+                            not isinstance(root, str) or not root.strip() or len(root) > 4096
+                            for root in roots):
+                        return self.json({"error": "Model search roots must be a list of up to 24 folders."}, 400)
+                    clean, seen = [], set()
+                    for root in roots:
+                        path_on_host = os.path.abspath(os.path.expanduser(root.strip()))
+                        if not os.path.isdir(path_on_host):
+                            return self.json({"error": f"Not a folder on this computer: {path_on_host}"}, 400)
+                        folded = os.path.normcase(path_on_host)
+                        if folded not in seen:
+                            seen.add(folded)
+                            clean.append(path_on_host)
+                    upd["model_search_roots"] = clean
                 if "cuda_device" in ch:
                     v = str(ch["cuda_device"] or "").strip()
                     if v and v not in {g["uuid"] for g in list_gpus()} | {str(g["index"]) for g in list_gpus()}:
