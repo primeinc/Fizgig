@@ -3005,7 +3005,7 @@ class Handler(BaseHTTPRequestHandler):
             from fizgig.web import model_inventory, pod_stop
             p = load_prefs()
             families = list(training_families())
-            model_stats = model_inventory.inventory(p, families, BASE_DIR)
+            model_stats = model_inventory.inventory(p, families, BASE_DIR, key_resolver=form.model_keys)
             return self.json({"models": {k: str(p.get(k) or "") for d in families
                                          for k in form.model_keys(d)},
                               "model_inventory": model_stats,

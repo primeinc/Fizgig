@@ -38,7 +38,13 @@ def test_moss_lora_files_in_uppercase_lora_folder_are_reused(tmp_path, monkeypat
         assert found == str(path)
 
 
-def test_alternative_catalog_build_is_discoverable_without_download():
+def test_manual_alternative_stays_a_link_not_an_implicit_download_choice():
+    # The Qwen3.5 int8 link is a manual alternative, not a fetch_choice.
+    # Discovery must not silently swap it in when given an unsupported choice.
+    desc = FAMILIES["moss_image"]
+    encoder = next(m for m in desc.model_files if m.pref_key == "moss_image_text_encoder")
+    assert encoder.alt_path.endswith("qwen3.5_9b_int8_convrot.safetensors")
+    assert not encoder.fetch_choice
     candidates = {w.pref_key: w for w in fetch_models.discovery_candidates(
         ("moss_image",), choices={"moss_image_text_encoder": "alt"})}
-    assert candidates["moss_image_text_encoder"].filename == "qwen3.5_9b_int8_convrot.safetensors"
+    assert candidates["moss_image_text_encoder"].filename == "qwen3.5_9b_bf16.safetensors"

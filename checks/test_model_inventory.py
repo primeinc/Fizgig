@@ -64,3 +64,16 @@ def test_configured_optional_not_included_in_required_remaining(tmp_path):
     data = inventory({"speed": ""}, [family(file("speed", 1.19, False))], str(tmp_path))
     assert data["summary"]["remaining_required_bytes"] == 0
     assert data["summary"]["remaining_optional_bytes"] == round(1.19 * GIB)
+
+
+def test_paths_from_family_options_are_included_even_without_model_file_metadata(tmp_path):
+    model = tmp_path / "custom" / "extra.safetensors"
+    model.parent.mkdir()
+    model.write_bytes(b"known existing file")
+    data = inventory(
+        {"dit": "", "option_model": str(model)},
+        [family(file("dit", 13.3))], str(tmp_path),
+        key_resolver=lambda _: ["dit", "option_model"])
+    assert data["files"]["option_model"]["exists"]
+    assert data["files"]["option_model"]["bytes"] == len(b"known existing file")
+    assert data["summary"]["disk_bytes"] == len(b"known existing file")

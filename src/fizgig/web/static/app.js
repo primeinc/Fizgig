@@ -1024,8 +1024,9 @@ function mpRow(family, key, m) {
     ...(!m.required ? [mpChip("Optional", "optional")] : []),
     ...(Number(m.size_gb) > 0 ? [mpChip("≈" + Number(m.size_gb).toFixed(2) + " GB")] : []));
   const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
-  const fileName = String(m.local_name || (m.path || "").split("/").pop());
-  (S.mpRows[key] ||= []).push({node: progress, filename: fileName});
+  const fileNames = [m.local_name || (m.path || "").split("/").pop(),
+    m.alt_path ? m.alt_path.split("/").pop() : ""].filter(Boolean);
+  (S.mpRows[key] ||= []).push({node: progress, filenames: fileNames});
   const status = el("span", {class: "mp-row-size " + state,
     text: st.exists ? mpSize(st.bytes) + " on disk" :
       state === "stale" ? "Path missing" : "Not on disk"});
@@ -1157,7 +1158,7 @@ function mpFamilyCard(f) {
       S.prefsOpen[open ? "delete" : "add"](f.key);
       title.setAttribute("aria-expanded", open ? "false" : "true");
     }},
-    el("span", {class: "mp-family-name", text: f.prefs_title || ("Model Paths (" + f.display_name + ")")}),
+    el("span", {class: "mp-family-name", text: f.display_name, title: f.prefs_title || f.display_name}),
     mpChip(ready + " / " + entries.length, ready === entries.length ? "ready" : "optional"),
     mpChip(mpSize(disk) + " on disk"),
     ...(remaining > 0 ? [mpChip(mpSize(remaining, true) + " missing", "missing")] : []),
@@ -1523,7 +1524,7 @@ function paintFetch() {
     }
   }
   for (const refs of Object.values(S.mpRows || {})) for (const row of refs) {
-    const active = busy && !!st.file && st.file.replaceAll("\\\\", "/").split("/").pop() === row.filename;
+    const active = busy && !!st.file && row.filenames.some((name) => st.file.endsWith(name));
     row.node.hidden = !active;
     if (active) row.node.textContent = mpSize(st.done) + " / " + mpSize(st.total) +
       " · " + mpSize(Math.max(0, st.total - st.done)) + " remaining";

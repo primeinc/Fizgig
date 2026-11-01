@@ -10,12 +10,16 @@ import os
 GIB = 1024 ** 3
 
 
-def inventory(prefs, families, repo_dir):
+def inventory(prefs, families, repo_dir, key_resolver=None):
     """Return keyed status and deduplicated totals for every Preferences model file."""
     entries = {}
     for family in families:
-        for model in family.model_files:
-            key = model.pref_key
+        known = {m.pref_key: m for m in family.model_files}
+        # The form may expose additional option-specific model paths that do not
+        # have a ModelFile entry. Check them too rather than marking them missing.
+        keys = key_resolver(family) if key_resolver else known
+        for key in keys:
+            model = known.get(key)
             original = str(prefs.get(key) or "").strip()
             path = os.path.abspath(original if os.path.isabs(original)
                                    else os.path.join(repo_dir, original)) if original else ""
@@ -24,15 +28,16 @@ def inventory(prefs, families, repo_dir):
                 exists = bool(path) and os.path.isfile(path)
             except OSError:
                 size, exists = 0, False
-            nominal = max(0, round(float(model.size_gb or 0) * GIB))
+            nominal = max(0, round(float(model.size_gb or 0) * GIB)) if model else 0
             previous = entries.get(key)
             if previous is None:
                 entries[key] = {"exists": exists, "configured": bool(original),
                                 "bytes": size if exists else 0, "expected_bytes": nominal,
-                                "required": bool(model.required), "path": path if exists else ""}
+                                "required": bool(model.required) if model else False,
+                                "path": path if exists else ""}
             else:
                 # The same preference may appear in several families: count it once.
-                previous["required"] |= bool(model.required)
+                previous["required"] |= bool(model.required) if model else False
                 previous["expected_bytes"] = max(previous["expected_bytes"], nominal)
 
     seen_files = set()
