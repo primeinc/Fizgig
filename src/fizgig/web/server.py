@@ -2601,7 +2601,7 @@ def _fetch_status() -> dict:
     return out
 
 
-def _start_fetch(family, token="", optional=False, choices=None):
+def _start_fetch(family, token="", optional=False, choices=None, model_paths=None):
     """The family's model files plus the helper models, into <repo>/models (a pod links that to its volume), paths
     written to Preferences by the fetcher. A token is passed to that one download only, never written to disk."""
     desc = _files_family(family)
@@ -2612,7 +2612,21 @@ def _start_fetch(family, token="", optional=False, choices=None):
     with _lock:
         if _fetch["proc"] is not None and _fetch["proc"].poll() is None:
             raise ValueError("A model download is already running.")
-    cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress", "--family", "tools", "--family", family]
+    # The download button must not start with a different or missing preferences file.
+    # Persist the actual model paths shown in this family's UI when they resolve to
+    # files on this machine, so an in-flight change event cannot make the child miss one.
+    if not os.path.isfile(PREFS_FILE):
+        update_prefs({})
+    if isinstance(model_paths, dict):
+        allowed = {f.pref_key for f in desc.model_files}
+        verified = {key: value.strip() for key, value in model_paths.items()
+                    if key in allowed and isinstance(value, str) and value.strip()
+                    and os.path.isfile(pref_path({key: value}, key))}
+        if verified:
+            update_prefs(verified)
+    cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress",
+           "--prefs-file", PREFS_FILE, "--models-dir", user_data.MODELS_DIR,
+           "--family", "tools", "--family", family]
     if optional or not desc.fetch_optional_label:
         cmd.append("--include-optional")          # no optional tick on the family: its whole list, as the desktop
     offered = {f.pref_key for f in desc.model_files if f.fetch_choice}
@@ -4217,7 +4231,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"error": str(e)}, 400)
             if path == "/api/fetch":
                 _start_fetch(b.get("family", ""), b.get("token", ""), bool(b.get("optional")),
-                             b.get("choices") if isinstance(b.get("choices"), dict) else None)
+                             b.get("choices") if isinstance(b.get("choices"), dict) else None,
+                             b.get("model_paths") if isinstance(b.get("model_paths"), dict) else None)
                 return self.json({"ok": True})
             if path == "/api/fetch/cancel":
                 return self.json({"ok": _cancel_fetch()})

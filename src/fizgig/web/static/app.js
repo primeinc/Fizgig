@@ -964,17 +964,35 @@ function renderPrefs() {
     for (const key of f.model_keys) {
       const m = files.get(key) || {label: key, note: "", hint: ""};
       const input = el("input", {type: "text", class: "w-path", value: S.prefs[key] || ""});
-      input.addEventListener("change", async () => {
-        S.prefs[key] = input.value.trim();
-        await api("/api/prefs", {changes: {[key]: S.prefs[key]}});
-        checkModels();
-        refreshStateSoon();              // a preview file set or cleared: Samples follows it
-        captionModelsChanged();          // the Krea 2 text encoder: Captions' Qwen3-VL
-      });
+      const saveStatus = el("div", {class: "field-hint"});
+      // Serialize saves: an older blur event must never restore a path after Clear.
+      let pendingSave = Promise.resolve();
+      const clearBtn = el("button", {class: "btn", text: "Clear", disabled: !input.value.trim(),
+        title: "Clear only this saved path. The model file is NOT deleted.",
+        onclick: () => savePath("")});
+      const savePath = (value) => {
+        const next = String(value || "").trim();
+        input.value = next;
+        S.prefs[key] = next;
+        clearBtn.disabled = !next;
+        pendingSave = pendingSave.then(async () => {
+          try {
+            await api("/api/prefs", {changes: {[key]: next}});
+            saveStatus.textContent = "";
+            checkModels();
+            refreshStateSoon();
+            captionModelsChanged();
+          } catch (e) { saveStatus.textContent = "Could not save model path: " + e.message; }
+        });
+        return pendingSave;
+      };
+      input.addEventListener("input", () => { clearBtn.disabled = !input.value.trim(); });
+      input.addEventListener("change", () => savePath(input.value));
       const row = el("div", {class: "field-row"},
         el("span", {class: "field-label", text: (m.label || key) + (m.required ? " *" : "") + ":"}), input,
         el("button", {class: "btn", text: "Choose…", title: "Pick from what is on the machine running Fizgig", onclick: () =>
-          pick(input.value, false, (p) => { input.value = p; input.dispatchEvent(new Event("change")); })}));
+          pick(input.value, false, (p) => { input.value = p; savePath(p); })}),
+        clearBtn);
       if (m.repo && m.path) {
         row.append(el("a", {class: "btn", target: "_blank", rel: "noopener", text: m.download_label || "Download",
           href: `https://huggingface.co/${m.repo}/blob/main/${m.path}`}));
@@ -987,7 +1005,7 @@ function renderPrefs() {
       const dl = [m.repo && m.path ? (m.download_note || `~${m.size_gb || "?"} GB - ${m.repo} → ${m.path.split("/").pop()}`) : "",
         m.alt_repo && m.alt_path ? m.alt_note : ""].filter(Boolean).join(" · ");
       body.append(el("div", {class: "pref-file"}, row, hint ? el("div", {class: "field-hint", text: hint}) : null,
-        dl ? el("div", {class: "field-hint", text: dl}) : null));
+        dl ? el("div", {class: "field-hint", text: dl}) : null, saveStatus));
     }
     if (f.prefs_note) body.append(el("div", {class: "field-hint prefs-note", text: f.prefs_note}));
     const fetchBox = fetchRow(f);
@@ -1158,18 +1176,30 @@ function captionerCard() {
   const c = S.captioner || {path: "", note: "", links: []};
   const input = el("input", {type: "text", class: "w-path", value: c.path || "", placeholder: "Empty = the Krea 2 text encoder"});
   const note = el("div", {class: "field-hint", text: c.note || ""});
-  const save = async () => {
-    try {
-      await api("/api/prefs", {changes: {captioner_secondary: input.value.trim()}});
-      S.captioner = (await api("/api/prefs")).captioner || c;
-      note.textContent = S.captioner.note || "";
-      captionModelsChanged();
-    } catch (e) { note.textContent = e.message; }
+  let pendingSave = Promise.resolve();
+  const clearBtn = el("button", {class: "btn", text: "Clear", disabled: !input.value.trim(),
+    title: "Clear only this captioning model path. The file is NOT deleted.",
+    onclick: () => save("")});
+  const save = (value = input.value) => {
+    const next = String(value || "").trim();
+    input.value = next;
+    clearBtn.disabled = !next;
+    pendingSave = pendingSave.then(async () => {
+      try {
+        await api("/api/prefs", {changes: {captioner_secondary: next}});
+        S.captioner = (await api("/api/prefs")).captioner || c;
+        note.textContent = S.captioner.note || "";
+        captionModelsChanged();
+      } catch (e) { note.textContent = "Could not save captioner path: " + e.message; }
+    });
+    return pendingSave;
   };
-  input.addEventListener("change", save);
+  input.addEventListener("input", () => { clearBtn.disabled = !input.value.trim(); });
+  input.addEventListener("change", () => save(input.value));
   const row = el("div", {class: "field-row"}, el("span", {class: "field-label", text: "Secondary captioning model:"}),
     input, el("button", {class: "btn", text: "Choose…", title: "Pick from what is on the machine running Fizgig",
-      onclick: () => pick(input.value, false, (p) => { input.value = p; save(); })}),
+      onclick: () => pick(input.value, false, (p) => { input.value = p; save(p); })}),
+    clearBtn,
     ...(c.links || []).map((l) => el("a", {class: "btn", target: "_blank", rel: "noopener", href: l.href,
       text: l.label.split(" (")[0], title: l.label})));
   return el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Captioning model"})),
@@ -1255,7 +1285,11 @@ function fetchRow(f) {
   const btn = el("button", {class: "btn btn-accent", text: "⬇ Download models for me", onclick: async () => {
     try {
       await api("/api/fetch", {family: f.key, token: token ? token.value.trim() : "", optional: opt ? opt.checked : false,
-        choices: Object.fromEntries(picks.map((p) => [p.key, p.sel.value]))});
+        choices: Object.fromEntries(picks.map((p) => [p.key, p.sel.value])),
+        // The downloader must see exactly the model paths currently displayed in this
+        // family, even when a field's asynchronous change save has not finished yet.
+        model_paths: Object.fromEntries(f.model_keys.filter((key) => typeof S.prefs[key] === "string" &&
+          S.prefs[key].trim()).map((key) => [key, S.prefs[key]]))});
       if (token) token.value = "";
       S.fetchError = null;
       watchFetch();

@@ -416,6 +416,16 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
         prefs[w.pref_key] = found
         return True
 
+    # A populated Preferences row is a user selection. If it no longer exists and
+    # discovery found nothing, do not silently turn it into a multi-GB download.
+    # Clearing that row explicitly is how the user authorises a fresh download.
+    configured = str(prefs.get(w.pref_key) or "").strip()
+    if configured:
+        log(f"  [stale] {w.pref_key}: saved file not found: {configured}")
+        log("          Searched your saved model directories and caches; no match. "
+            "Correct or clear the Preferences path before downloading.")
+        return False
+
     try:
         download_parent, dest = model_destinations.destination(w, models_dir, prefs)
     except ValueError as error:
@@ -551,20 +561,27 @@ def _chosen(w, choices):
 
 
 def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_optional=False,
-          log=print, dry_run=False, choices=None):
+          log=print, dry_run=False, choices=None, prefs_file=None):
     """Fetch every asset for the named families. Returns True if nothing failed. choices: {pref_key: "main" | "alt"}
     for files offered with an alternative build (ModelFile.fetch_choice)."""
     models_dir = os.path.abspath(models_dir or os.path.join(repo_dir, "user_data", "models"))
     if os.path.normcase(os.path.abspath(repo_dir)) == os.path.normcase(REPO_DIR):
         from fizgig import user_data
         user_data.migrate()
-    prefs_file = os.path.join(repo_dir, "user_data", "prefs.json")
-    if os.environ.get("FIZGIG_USER_DATA") and os.path.normcase(os.path.abspath(repo_dir)) == os.path.normcase(REPO_DIR):
-        prefs_file = os.path.join(os.environ["FIZGIG_USER_DATA"], "prefs.json")    # a second Fizgig's own settings
+    if prefs_file is None:
+        prefs_file = os.path.join(repo_dir, "user_data", "prefs.json")
+        if os.environ.get("FIZGIG_USER_DATA") and os.path.normcase(os.path.abspath(repo_dir)) == os.path.normcase(REPO_DIR):
+            prefs_file = os.path.join(os.environ["FIZGIG_USER_DATA"], "prefs.json")
+    else:
+        prefs_file = os.path.abspath(os.path.expanduser(prefs_file))
+        if not os.path.isfile(prefs_file):
+            log(f"[prefs] The web server's Preferences file does not exist: {prefs_file}. Refusing to download.")
+            return False
     if not dry_run:
         os.makedirs(models_dir, exist_ok=True)
     prefs = _load_prefs(prefs_file)
     prefs_before = dict(prefs)
+    log(f"[prefs] Using {prefs_file}")
 
     planned = [_chosen(w, choices) for fam in families if fam in FAMILIES for w in FAMILIES[fam]
                if include_optional or not w.optional]
@@ -633,6 +650,8 @@ def main():
                    help="Also fetch the optional files (Krea 2 Turbo DiT ~13 GB, MiniMax ref2va DiT ~21 GB, "
                         "SDXL's separate VAE, Anima's Turbo LoRA).")
     p.add_argument("--models-dir", default=None, help="Default: <repo>/models")
+    p.add_argument("--prefs-file", default=None,
+                   help="Absolute Preferences file from the web server (the same file the UI displays).")
     p.add_argument("--token", default=None, help="HuggingFace token for gated repos (or HF_TOKEN).")
     p.add_argument("--dry-run", action="store_true", help="Show what would be fetched.")
     p.add_argument("--choose", action="append", default=[], metavar="PREF=main|alt",
@@ -659,7 +678,8 @@ def main():
 
     choices = dict(c.split("=", 1) for c in a.choose if "=" in c)
     ok = fetch(families, models_dir=a.models_dir, token=a.token,
-               include_optional=a.include_optional, dry_run=a.dry_run, choices=choices)
+               include_optional=a.include_optional, dry_run=a.dry_run,
+               choices=choices, prefs_file=a.prefs_file)
     sys.exit(0 if ok else 1)
 
 
