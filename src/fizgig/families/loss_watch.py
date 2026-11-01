@@ -291,7 +291,7 @@ class Watch:
                     instr = (self.instr_detailed if attempt >= 2 else self.instr) or None
                     # 160 tokens on the first try: room for the Detailed and Style tasks (a caption ends where it ends)
                     cap = generate_caption(enc, img, detailed=attempt >= 2, instruction=instr, max_new_tokens=160)
-                    cap = apply_recaption_rules(cap, self.caption_rules)
+                    cap = apply_recaption_rules(cap, getattr(self, "caption_rules", ()))
                     prefix = self.watch.where(k)[0] or ""
                     trig = self.triggers.get(prefix, "") if prefix else self.trigger_word   # the picture's folder's
                     if trig:
