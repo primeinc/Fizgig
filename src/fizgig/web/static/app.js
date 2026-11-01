@@ -1255,7 +1255,11 @@ function fetchRow(f) {
   const btn = el("button", {class: "btn btn-accent", text: "⬇ Download models for me", onclick: async () => {
     try {
       await api("/api/fetch", {family: f.key, token: token ? token.value.trim() : "", optional: opt ? opt.checked : false,
-        choices: Object.fromEntries(picks.map((p) => [p.key, p.sel.value]))});
+        choices: Object.fromEntries(picks.map((p) => [p.key, p.sel.value])),
+        // The downloader must see exactly the model paths currently displayed in this
+        // family, even when a field's asynchronous change save has not finished yet.
+        model_paths: Object.fromEntries(f.model_keys.filter((key) => typeof S.prefs[key] === "string" &&
+          S.prefs[key].trim()).map((key) => [key, S.prefs[key]]))});
       if (token) token.value = "";
       S.fetchError = null;
       watchFetch();
