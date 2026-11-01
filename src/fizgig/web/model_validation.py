@@ -95,7 +95,7 @@ def _inspect_file(path):
             example = {"name": key, "shape": list(part.get_shape()), "dtype": part.get_dtype()}
             kind = _fingerprint(keys)
         return {"state": "inspected", "kind": kind, "tensors": len(keys), "example": example}
-    except (OSError, ValueError, RuntimeError, Exception) as exc:
+    except Exception as exc:
         return {"state": "invalid", "message": "Cannot read safetensors header: " + str(exc)[:250]}
 
 
@@ -229,7 +229,7 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
         return {"state": "cancelled", "path": path, "message": "Test cancelled."}
     refs = _sources(model, builds, alias_models)
     if not refs:
-        return {"state": "unverified", "path": path, **structural,
+        return {"state": "unverified", "path": path, **{k: v for k, v in structural.items() if k != "state"},
                 "message": "Valid safetensors layout, but this slot has no trusted reference checksum."}
     resolve = lookup or _hub_reference
     errors = []
