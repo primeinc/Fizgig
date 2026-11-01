@@ -585,7 +585,28 @@
                 <input type="checkbox" id="frWholeWord" checked> Match whole words only</label></div>
               <div class="field-row"><button class="btn" id="frPreview">Preview</button>
                 <button class="btn btn-primary" id="frApply">Replace in all captions</button>
-                <span class="field-hint" id="frStatus"></span></div>
+                <span class="field-hint" id="frStatus" role="status"></span></div>
+              <label class="checkbox-label cap-rule-remember">
+                <input type="checkbox" id="frRemember" checked>
+                Also save this Find → Replace pair as an automatic rule for this training folder
+              </label>
+              <div class="cap-rules-panel" aria-label="Saved automatic caption corrections">
+                <div class="cap-rules-title">
+                  <div><strong>Automatic caption corrections</strong>
+                    <p>Run after AI captioning and training-time auto-recaption, before each new caption is written.
+                       Existing captions are not touched. Rules belong to this training folder.</p></div>
+                  <span id="capRuleCount" class="mp-chip">0 rules</span>
+                </div>
+                <label class="checkbox-label cap-rules-toggle">
+                  <input type="checkbox" id="capRulesEnabled">
+                  Automatically correct newly generated AI captions
+                </label>
+                <div id="capRulesList" class="cap-rules-list"></div>
+                <div class="cap-rules-footer">
+                  <button class="btn btn-sm" id="frAddRule">Save current pair as a rule</button>
+                  <span id="capRulesStatus" class="field-hint" role="status"></span>
+                </div>
+              </div>
               <div class="field-row"><span class="field-label">Add to the start:</span>
                 <input type="text" id="frStart" class="w-path" placeholder="after the trigger word, e.g. photo"></div>
               <div class="field-row"><span class="field-label">Add to the end:</span>
