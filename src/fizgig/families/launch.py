@@ -959,6 +959,8 @@ def train_command(desc, inputs, plan):
             if st.get("recaption_triggers"):         # the other folders' own: {key prefix: trigger word}
                 import json as _json
                 cmd += ["--recaption_triggers", _json.dumps(st["recaption_triggers"])]
+            if _s(st.get("recaption_replace_rules")):
+                cmd += ["--recaption_replace_rules", _s(st["recaption_replace_rules"])]
             from fizgig.krea2.caption_text import RECAPTION_DEFAULTS, recaption_instruction
             ovr = st.get("caption_overrides") or {}
             tasks = tuple(st.get("recaption_tasks") or RECAPTION_DEFAULTS)
@@ -1628,6 +1630,12 @@ def plan(desc, inputs):
         inputs["ADAPTIVE_LR"] = False
         inputs["loss_watch"] = {**(inputs.get("loss_watch") or {}), "per_image_lr": False, "warmup": False}
     p = LaunchPlan(problems=start_problems(desc, inputs))
+    if (inputs.get("loss_watch") or {}).get("recaption") and _s(inputs.get("recaption_replace_rules")):
+        from fizgig.caption_replace import parse_recaption_rules
+        try:
+            parse_recaption_rules(_s(inputs["recaption_replace_rules"]))
+        except ValueError as error:
+            p.problems.append(str(error))
     _cp = detail_crops_problem(desc, inputs) if not p.problems else ""
     if _cp:
         p.problems.append(_cp)

@@ -15,6 +15,8 @@ import time
 
 import torch
 
+from fizgig.caption_replace import apply_recaption_rules, parse_recaption_rules
+
 logger = logging.getLogger(__name__)
 
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
@@ -67,7 +69,8 @@ class Watch:
     def __init__(self, output_dir, group, user_config, driver, *, log=False, per_image_lr=False, auto_recaption=False,
                  warmup_look=False, resume=False, start_epoch=0, te_path=None, trigger_word=None,
                  trigger_position="start", recaption_triggers=None, recaption_instruction=None, recaption_instruction_detailed=None,
-                 captioner_path=None, recaption_task=None, recaption_task_detailed=None):
+                 captioner_path=None, recaption_task=None, recaption_task_detailed=None,
+                 recaption_replace_rules=""):
         from fizgig.training.loss_logger import PerImageLossWatch, is_enabled as env_on
         self.output_dir, self.group, self.driver, self.te_path = output_dir, group, driver, te_path
         self.trigger_word, self.trigger_position = trigger_word, trigger_position
@@ -75,6 +78,7 @@ class Watch:
         self.instr, self.instr_detailed = recaption_instruction, recaption_instruction_detailed
         self.recaptioned = {}
         self.captioner_path = captioner_path
+        self.caption_rules = parse_recaption_rules(recaption_replace_rules) if auto_recaption else ()
         self.watch = None
         if not resume:
             _cleanup(output_dir)
@@ -287,6 +291,7 @@ class Watch:
                     instr = (self.instr_detailed if attempt >= 2 else self.instr) or None
                     # 160 tokens on the first try: room for the Detailed and Style tasks (a caption ends where it ends)
                     cap = generate_caption(enc, img, detailed=attempt >= 2, instruction=instr, max_new_tokens=160)
+                    cap = apply_recaption_rules(cap, self.caption_rules)
                     prefix = self.watch.where(k)[0] or ""
                     trig = self.triggers.get(prefix, "") if prefix else self.trigger_word   # the picture's folder's
                     if trig:

@@ -45,3 +45,32 @@ def highlighted_segments(
         pos = match.end()
     if pos < len(text):
         yield text[pos:], False
+
+def parse_recaption_rules(spec: str):
+    """Ordered literal whole-word rules, one 'find => replacement' per line.
+
+    This is job configuration, not a global gender correction. Rule text is
+    interpreted literally, never as user-supplied regular expressions.
+    """
+    if not isinstance(spec, str) or len(spec) > 4096:
+        raise ValueError("Auto-recaption replacements must be text, 4096 characters or fewer.")
+    rules = []
+    for line_number, raw in enumerate(spec.splitlines(), start=1):
+        if not raw.strip():
+            continue
+        if "=>" not in raw:
+            raise ValueError(f"Auto-recaption replacement line {line_number}: use find => replacement.")
+        source, replacement = (part.strip() for part in raw.split("=>", 1))
+        if not source or len(source) > 120 or len(replacement) > 240:
+            raise ValueError(f"Auto-recaption replacement line {line_number} has an invalid length.")
+        rules.append((compile_find_pattern(source, whole_word=True), replacement))
+        if len(rules) > 30:
+            raise ValueError("Auto-recaption supports at most 30 replacement rules per job.")
+    return tuple(rules)
+
+
+def apply_recaption_rules(caption: str, rules) -> str:
+    """Fix one newly generated caption before it is written and re-encoded."""
+    for pattern, replacement in rules:
+        caption = pattern.sub(lambda _match: replacement, caption)
+    return caption
