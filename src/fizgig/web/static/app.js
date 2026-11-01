@@ -1048,6 +1048,7 @@ function mpOptionalPanel(f) {
 function mpFamilySummary(f) {
   const entries = mpModels(f);
   const ready = entries.filter(([key]) => mpStat(key).exists).length;
+  const folders = entries.filter(([key]) => mpStat(key).exists && mpStat(key).directory).length;
   const seen = new Set();
   let disk = 0, remaining = 0;
   for (const [key,m] of entries) {
@@ -1060,7 +1061,7 @@ function mpFamilySummary(f) {
       seen.add("missing:" + same); remaining += st.expected_bytes || 0;
     }
   }
-  return {ready, total: entries.length, disk, remaining};
+  return {ready, total: entries.length, disk, remaining, folders};
 }
 function mpToolbar(families, f) {
   const totals = mpFamilySummary(f);
@@ -1074,7 +1075,8 @@ function mpToolbar(families, f) {
     el("div", {class: "mp-metric"}, el("strong", {text: totals.ready + " / " + totals.total}),
       el("small", {text: "models ready"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.disk)}),
-      el("small", {text: "model files on disk"})),
+      el("small", {text: totals.folders ?
+        "measured file bytes · " + totals.folders + " folder(s) unmeasured" : "measured file bytes"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.remaining, true)}),
       el("small", {text: "required downloads left"})));
   const top = el("div", {class: "mp-workspace-head"},
