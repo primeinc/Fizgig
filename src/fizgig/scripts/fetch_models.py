@@ -150,6 +150,19 @@ FAMILIES = {
 
 
 
+def _weight_from_file(f):
+    """One canonical FamilyDescription.ModelFile -> a discoverable Weight."""
+    w = Weight(f.pref_key, f.repo, f.path, f.size_gb, f.label + (" — " + f.note if f.note else ""),
+               optional=f.fetch_is_optional, gated=f.gated, local_name=f.local_name or None,
+               replaces=f.replaces)
+    w.same_as = f.same_as
+    if f.fetch_choice and f.alt_repo and f.alt_path:
+        w.alt = Weight(f.pref_key, f.alt_repo, f.alt_path, f.alt_size_gb or f.size_gb,
+                       f"{f.label} — {f.fetch_choice[1]}", optional=w.optional, gated=f.gated,
+                       replaces=f.replaces)
+    return w
+
+
 def _described_families():
     """Families added through the standard layer (fizgig.families): their download lists come from their
     descriptions (model_files), never from a hand-written list here. Not part of --all (opt-in)."""
@@ -168,15 +181,7 @@ def _described_families():
         for f in d.model_files:
             if not (f.repo and f.path and f.bulk_fetch):
                 continue
-            w = Weight(f.pref_key, f.repo, f.path, f.size_gb, f.label + (" — " + f.note if f.note else ""),
-                       optional=f.fetch_is_optional, gated=f.gated, local_name=f.local_name or None,
-                       replaces=f.replaces)
-            w.same_as = f.same_as
-            if f.fetch_choice and f.alt_repo and f.alt_path:
-                w.alt = Weight(f.pref_key, f.alt_repo, f.alt_path, f.alt_size_gb or f.size_gb,
-                               f"{f.label} — {f.fetch_choice[1]}", optional=w.optional, gated=f.gated,
-                               replaces=f.replaces)
-            ws.append(w)
+            ws.append(_weight_from_file(f))
         out[d.key] = ws + ([] if any(w.pref_key == _CAPTION_TE.pref_key for w in ws) else [_CAPTION_TE]) + [_STRANGERS]
     return out
 
@@ -212,6 +217,30 @@ def model_candidates(families=None, include_optional=True, choices=None):
                 continue
             seen.add(w.pref_key)
             yield w
+
+
+def discovery_candidates(families=None, choices=None):
+    """All path-backed catalog files, including intentionally non-bulk optional models.
+
+    Bulk downloading remains unchanged: fetch_on_use and optional one-off LoRAs
+    are searchable and linkable, but the big Download models for me button will
+    not silently fetch them.
+    """
+    selected = tuple(FAMILIES) if families is None else tuple(families)
+    seen = set()
+    for w in model_candidates(selected, include_optional=True, choices=choices):
+        seen.add(w.pref_key)
+        yield w
+    from fizgig.families.registry import FAMILIES as descriptions
+    for family in selected:
+        desc = descriptions.get(family)
+        if desc is None:
+            continue
+        for f in desc.model_files:
+            if f.pref_key in seen or not f.repo or not f.path:
+                continue
+            seen.add(f.pref_key)
+            yield _chosen(_weight_from_file(f), choices)
 
 
 # Loaded by name at runtime, so there is no pref to write — see the module docstring.

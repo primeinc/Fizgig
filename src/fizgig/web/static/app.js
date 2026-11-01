@@ -72,6 +72,7 @@ async function boot() {
   S.uploadRoot = await api("/api/upload/root").catch(() => null);   // before the forms: where Choose… starts
   const pr = await api("/api/prefs");
   S.prefs = pr.models || {};
+  S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
   S.modelRoots = pr.model_search_roots || [];
   S.modelDownloadLayout = pr.model_download_layout || "fizgig";
   S.modelDownloadRoot = pr.model_download_root || "";
@@ -936,99 +937,267 @@ async function renderPresets() {
   };
 }
 
-// ---- Preferences: every family's model files, from its description -----------------------------------------
+// ---- Preferences: compact model paths, driven by FamilyDescription metadata --------------------------------
+// One data source: /api/schema model_files + /api/prefs model_inventory. No second model catalog.
+const mpGiB = (bytes) => (Math.max(0, Number(bytes) || 0) / (1024 ** 3));
+const mpSize = (bytes, approx = false) => (approx ? "≈" : "") + mpGiB(bytes).toFixed(2) + " GB";
+const MP_ROLES = {dit: "DiT", preview_dit: "Preview", vae: "VAE", text_encoder: "Text",
+  speed_lora: "LoRA", look_lora: "LoRA", training_adapter: "Adapter"};
+
+function mpChip(value, style = "") {
+  return el("span", {class: "mp-chip" + (style ? " " + style : ""), text: value});
+}
+
+function mpModels(family) {
+  const entries = new Map((family.model_files || []).map((m) => [m.pref_key, m]));
+  return (family.model_keys || []).map((key) => [key, entries.get(key) ||
+    {pref_key: key, label: key, note: "Model path used by this family", size_gb: 0, required: false}]);
+}
+
+function mpStat(key) {
+  return S.modelInventory?.files?.[key] || {exists: false, configured: !!S.prefs[key],
+    bytes: 0, expected_bytes: 0, required: false};
+}
+
+function mpHelp(description, source, altSource) {
+  const content = el("div", {class: "mp-help-content"},
+    el("div", {text: description || "Model file used by this training family."}));
+  if (source?.repo && source.path) content.append(
+    el("div", {class: "mp-help-source", text: "Source: " + source.repo + " / " + source.path}),
+    el("a", {target: "_blank", rel: "noopener", href: "https://huggingface.co/" + source.repo +
+      "/blob/main/" + source.path, text: "Official file ↗"}));
+  if (altSource) content.append(el("div", {class: "mp-help-source", text: altSource}));
+  return el("details", {class: "mp-help"},
+    el("summary", {class: "mp-help-button", title: "Details (hover, focus or click)",
+      "aria-label": "Read model details"}, "?"), content);
+}
+
+function mpRefresh() {
+  return api("/api/prefs").then((pr) => {
+    S.prefs = pr.models || {};
+    S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
+    renderPrefs();
+    checkModels();
+    refreshStateSoon();
+    captionModelsChanged();
+  });
+}
+
+function mpRow(family, key, m) {
+  const st = mpStat(key), path = String(S.prefs[key] || "");
+  const state = st.exists ? "ready" : path.trim() ? "stale" : "missing";
+  const statusLabel = st.exists ? "On disk" : path.trim() ? "Path not found" : "Not configured";
+  const label = m.label || key;
+  const input = el("input", {type: "text", class: "w-path mp-path-input", value: path,
+    "aria-label": label + " file path", spellcheck: "false", title: path || "Choose a model file"});
+  const saveStatus = el("div", {class: "mp-save-error", role: "status"});
+  let pendingSave = Promise.resolve();
+  const clearBtn = el("button", {class: "btn btn-sm", text: "Clear", disabled: !path.trim(),
+    title: "Clear this one saved path. The file is not deleted.", onclick: () => savePath("")});
+  const savePath = (value) => {
+    const next = String(value || "").trim();
+    input.value = next;
+    input.title = next || "Choose a model file";
+    S.prefs[key] = next;
+    clearBtn.disabled = !next;
+    pendingSave = pendingSave.then(async () => {
+      try {
+        await api("/api/prefs", {changes: {[key]: next}});
+        saveStatus.textContent = "";
+        await mpRefresh();
+      } catch (error) { saveStatus.textContent = "Could not save: " + error.message; }
+    });
+    return pendingSave;
+  };
+  input.addEventListener("input", () => { clearBtn.disabled = !input.value.trim(); });
+  input.addEventListener("change", () => savePath(input.value));
+
+  const sourceNote = [m.hint || m.note, m.download_note].filter(Boolean).join("\n");
+  const alternative = m.alt_repo && m.alt_path ?
+    ("Alternative build: " + m.alt_repo + " / " + m.alt_path + (m.alt_note ? " — " + m.alt_note : "")) : "";
+  const info = el("div", {class: "mp-row-info"},
+    el("span", {class: "mp-dot " + state, title: statusLabel, "aria-label": statusLabel,
+      text: st.exists ? "✓" : state === "stale" ? "!" : "○"}),
+    el("span", {class: "mp-row-name", text: label, title: label}),
+    mpHelp(sourceNote, m, alternative),
+    mpChip(MP_ROLES[m.role] || "Model", "role"),
+    ...(!m.required ? [mpChip("Optional", "optional")] : []),
+    ...(Number(m.size_gb) > 0 ? [mpChip("≈" + Number(m.size_gb).toFixed(2) + " GB")] : []));
+  const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
+  const fileName = String(m.local_name || (m.path || "").split("/").pop());
+  (S.mpRows[key] ||= []).push({node: progress, filename: fileName});
+  const status = el("span", {class: "mp-row-size " + state,
+    text: st.exists ? mpSize(st.bytes) + " on disk" :
+      state === "stale" ? "Path missing" : "Not on disk"});
+  const controls = el("div", {class: "mp-row-controls"},
+    el("button", {class: "btn btn-sm", text: "Choose…",
+      title: "Pick a model file on the Fizgig computer", onclick: () =>
+        pick(input.value, false, (picked) => { input.value = picked; savePath(picked); })}),
+    clearBtn);
+  if (m.repo && m.path) controls.append(el("a", {class: "btn btn-sm", target: "_blank",
+    rel: "noopener", title: "Open the official model file on Hugging Face (not a background download)",
+    href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path, text: m.download_label || "Source ↗"}));
+  if (m.alt_repo && m.alt_path) controls.append(el("a", {class: "btn btn-sm",
+    target: "_blank", rel: "noopener", title: "Alternative model file on Hugging Face",
+    href: "https://huggingface.co/" + m.alt_repo + "/blob/main/" + m.alt_path,
+    text: m.alt_label || "Alt ↗"}));
+  return el("div", {class: "mp-file", "data-status": state, "data-key": key},
+    info,
+    el("div", {class: "mp-path-line"}, input, controls),
+    el("div", {class: "mp-file-footer"}, status, progress, saveStatus));
+}
+
+function mpOptionalPanel(families) {
+  const items = [];
+  const seen = new Set();
+  for (const f of families) for (const m of f.model_files || []) {
+    const optional = !m.required && !!m.repo && !!m.path;
+    const alternate = !!m.alt_repo && !!m.alt_path;
+    if (!optional && !alternate) continue;
+    const key = f.key + ":" + m.pref_key;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({family: f, model: m, optional, alternate});
+  }
+  if (!items.length) return null;
+  const panel = el("details", {class: "mp-optional-panel"},
+    el("summary", {}, el("span", {class: "mp-optional-heading", text: "Optional models & alternative builds"}),
+      mpChip(items.length + " choices"), el("span", {class: "mp-expand-icon", text: "⌄"})));
+  const body = el("div", {class: "mp-optional-list"});
+  for (const {family: f, model: m, optional, alternate} of items) {
+    const kinds = [optional ? "Optional" : "", alternate ? "Alternate build" : ""].filter(Boolean).join(" · ");
+    body.append(el("div", {class: "mp-optional-entry"},
+      el("div", {class: "mp-optional-name"}, el("b", {text: m.label}), mpChip(kinds)),
+      el("span", {class: "mp-optional-description", text: f.display_name +
+        (alternate ? " · " + (m.alt_label || m.alt_path.split("/").pop()) : "")}),
+      el("button", {class: "btn btn-sm", text: "Show model", onclick: () => {
+        S.mpFamily = f.key; S.mpFilter = "all"; S.prefsOpen.add(f.key);
+        renderPrefs();
+        document.querySelector('[data-model-family="' + f.key + '"]')?.scrollIntoView({block: "nearest"});
+      }})));
+  }
+  panel.append(body);
+  return panel;
+}
+
+function mpToolbar(families) {
+  const summary = S.modelInventory?.summary || {};
+  const bar = el("div", {class: "mp-summary"},
+    mpChip((summary.found || 0) + " on disk", "ready"),
+    mpChip((summary.optional || 0) + " optional", "optional"),
+    mpChip(mpSize(summary.disk_bytes || 0) + " on disk"),
+    mpChip(mpSize(summary.remaining_required_bytes || 0, true) + " required downloads left", "missing"));
+  const searchStatus = el("span", {class: "mp-search-status", role: "status"});
+  S.mpSearchStatus = searchStatus;
+  const actions = el("div", {class: "mp-toolbar-actions"},
+    el("button", {class: "btn", text: "Search locally", title: "Scan saved search roots; never downloads",
+      onclick: () => startModelSearch("")}),
+    el("button", {class: "btn btn-accent", text: "Download options",
+      title: "Open the current family's download controls; does not download immediately",
+      onclick: () => {
+        const chosen = families.some((f) => f.key === S.mpFamily) ? S.mpFamily :
+          families.some((f) => f.key === S.family) ? S.family : families[0]?.key;
+        if (!chosen) return;
+        S.mpFamily = chosen;
+        S.mpFilter = "all";
+        S.prefsOpen.add(chosen);
+        renderPrefs();
+        const panel = document.querySelector('[data-model-family="' + chosen + '"] .mp-download-panel');
+        if (panel) { panel.open = true; panel.scrollIntoView({block: "nearest"}); }
+      }}));
+  const top = el("div", {class: "mp-workspace-head"},
+    el("div", {}, el("h2", {text: "Model Paths"}), el("p", {text: "Reuse existing model files; configure training, captioning and previews."})), actions);
+  const filters = [{id: "all", name: "All"}, {id: "ready", name: "On disk"},
+    {id: "missing", name: "Missing"}, {id: "optional", name: "Optional"}];
+  const pills = filters.map(({id, name}) => el("button",
+    {class: "mp-filter" + (S.mpFilter === id ? " active" : ""),
+      "aria-pressed": S.mpFilter === id ? "true" : "false", text: name, onclick: () => {
+        S.mpFilter = id; renderPrefs();
+      }}));
+  const select = el("select", {class: "mp-family-filter", "aria-label": "Filter model family",
+    onchange: (e) => { S.mpFamily = e.target.value; renderPrefs(); }},
+    el("option", {value: "*", text: "All model families"}),
+    ...families.map((f) => el("option", {value: f.key, text: f.display_name})));
+  select.value = S.mpFamily || "*";
+  const optional = mpOptionalPanel(families);
+  const root = el("section", {class: "mp-workspace"}, top, bar, searchStatus,
+    optional,
+    el("div", {class: "mp-filters"}, el("div", {class: "mp-pills"}, ...pills), select));
+  return root;
+}
+
+function mpFamilyCard(f) {
+  if (S.mpFamily !== "*" && S.mpFamily !== f.key) return null;
+  const entries = mpModels(f).filter(([key,m]) => {
+    const st = mpStat(key);
+    return S.mpFilter === "all" || (S.mpFilter === "ready" && st.exists) ||
+      (S.mpFilter === "missing" && !st.exists) ||
+      (S.mpFilter === "optional" && !m.required);
+  });
+  if (!entries.length) return null;
+  const stats = entries.map(([key]) => mpStat(key));
+  const ready = stats.filter((s) => s.exists).length;
+  const disk = stats.reduce((sum, s) => sum + (s.exists ? s.bytes : 0), 0);
+  const remaining = entries.reduce((sum, [key, m]) => {
+    const st = mpStat(key);
+    return sum + (!st.exists && m.required ? st.expected_bytes : 0);
+  }, 0);
+  const expanded = S.prefsOpen.has(f.key);
+  const contents = el("div", {class: "card-content mp-family-body" + (expanded ? "" : " collapsed")});
+  if (f.prefs_intro) contents.append(el("div", {class: "mp-family-intro"}, mpHelp(f.prefs_intro)));
+  for (const [key,m] of entries) contents.append(mpRow(f, key, m));
+  if (f.prefs_note) contents.append(el("div", {class: "mp-family-intro"}, mpHelp(f.prefs_note)));
+  const fetchBox = fetchRow(f);
+  if (fetchBox) contents.append(el("details", {class: "mp-download-panel"},
+    el("summary", {text: "Download missing family models · options and progress"}), fetchBox));
+  const title = el("button", {class: "card-title mp-family-title", type: "button",
+    "aria-expanded": expanded ? "true" : "false",
+    onclick: () => {
+      const open = contents.classList.toggle("collapsed");
+      S.prefsOpen[open ? "delete" : "add"](f.key);
+      title.setAttribute("aria-expanded", open ? "false" : "true");
+    }},
+    el("span", {class: "mp-family-name", text: f.prefs_title || ("Model Paths (" + f.display_name + ")")}),
+    mpChip(ready + " / " + entries.length, ready === entries.length ? "ready" : "optional"),
+    mpChip(mpSize(disk) + " on disk"),
+    ...(remaining > 0 ? [mpChip(mpSize(remaining, true) + " missing", "missing")] : []),
+    el("span", {class: "mp-chevron", text: "⌄"}));
+  return el("div", {class: "section-card mp-family-card", "data-model-family": f.key}, title, contents);
+}
+
 function renderPrefs() {
   const host = $("prefsForm");
   host.innerHTML = "";
+  S.mpFilter ||= "all";
+  S.mpFamily ||= "*";
+  S.prefsOpen ||= new Set([S.family]);
+  S.fetchRows = {};
+  S.mpRows = {};
+  const families = S.schema.families.filter((f) => !f.prefs_skip);
+  host.append(mpToolbar(families));
+  const cards = families.map(mpFamilyCard).filter(Boolean);
+  host.append(...cards);
+  // Model-library configuration and the rest of Preferences keep their existing controls.
+  host.append(modelRootsCard(), modelDownloadCard());
   if (S.pod) host.append(podCard());
   host.append(webPortCard());
   if (!S.pod) host.append(networkCard());
-  host.append(dataFolderCard());
-  host.append(outputFolderCard());
-  host.append(foldersCard());
-  host.append(modelRootsCard());
-  host.append(modelDownloadCard());
-  host.append(inferenceCard());
-  host.append(captionerCard());
+  host.append(dataFolderCard(), outputFolderCard(), foldersCard(), inferenceCard(), captionerCard());
   const gpuCard = gpuPickCard();
   if (gpuCard) host.append(gpuCard);
-  S.fetchRows = {};
-  for (const f of S.schema.families) {
-    if (f.prefs_skip) continue;              // RefMod: MiniMax H3's files, on H3's card
-    // a model's card stays as you left it, open or shut, when the tab redraws (a download finishing); they all start
-    // shut - you open the one you want
-    if (!S.prefsOpen) S.prefsOpen = new Set();
-    const body = el("div", {class: "card-content" + (S.prefsOpen.has(f.key) ? "" : " collapsed")});
-    if (f.prefs_intro) body.append(el("div", {class: "card-desc prefs-intro", text: f.prefs_intro}));
-    const files = new Map(f.model_files.map((m) => [m.pref_key, m]));
-    for (const key of f.model_keys) {
-      const m = files.get(key) || {label: key, note: "", hint: ""};
-      const input = el("input", {type: "text", class: "w-path", value: S.prefs[key] || ""});
-      const saveStatus = el("div", {class: "field-hint"});
-      // Serialize saves: an older blur event must never restore a path after Clear.
-      let pendingSave = Promise.resolve();
-      const clearBtn = el("button", {class: "btn", text: "Clear", disabled: !input.value.trim(),
-        title: "Clear only this saved path. The model file is NOT deleted.",
-        onclick: () => savePath("")});
-      const savePath = (value) => {
-        const next = String(value || "").trim();
-        input.value = next;
-        S.prefs[key] = next;
-        clearBtn.disabled = !next;
-        pendingSave = pendingSave.then(async () => {
-          try {
-            await api("/api/prefs", {changes: {[key]: next}});
-            saveStatus.textContent = "";
-            checkModels();
-            refreshStateSoon();
-            captionModelsChanged();
-          } catch (e) { saveStatus.textContent = "Could not save model path: " + e.message; }
-        });
-        return pendingSave;
-      };
-      input.addEventListener("input", () => { clearBtn.disabled = !input.value.trim(); });
-      input.addEventListener("change", () => savePath(input.value));
-      const row = el("div", {class: "field-row"},
-        el("span", {class: "field-label", text: (m.label || key) + (m.required ? " *" : "") + ":"}), input,
-        el("button", {class: "btn", text: "Choose…", title: "Pick from what is on the machine running Fizgig", onclick: () =>
-          pick(input.value, false, (p) => { input.value = p; savePath(p); })}),
-        clearBtn);
-      if (m.repo && m.path) {
-        row.append(el("a", {class: "btn", target: "_blank", rel: "noopener", text: m.download_label || "Download",
-          href: `https://huggingface.co/${m.repo}/blob/main/${m.path}`}));
-      }
-      if (m.alt_repo && m.alt_path) {          // another build of the same file (the desktop's second link)
-        row.append(el("a", {class: "btn", target: "_blank", rel: "noopener", text: m.alt_label || "Download",
-          href: `https://huggingface.co/${m.alt_repo}/blob/main/${m.alt_path}`}));
-      }
-      const hint = m.hint || m.note;
-      const dl = [m.repo && m.path ? (m.download_note || `~${m.size_gb || "?"} GB - ${m.repo} → ${m.path.split("/").pop()}`) : "",
-        m.alt_repo && m.alt_path ? m.alt_note : ""].filter(Boolean).join(" · ");
-      body.append(el("div", {class: "pref-file"}, row, hint ? el("div", {class: "field-hint", text: hint}) : null,
-        dl ? el("div", {class: "field-hint", text: dl}) : null, saveStatus));
-    }
-    if (f.prefs_note) body.append(el("div", {class: "field-hint prefs-note", text: f.prefs_note}));
-    const fetchBox = fetchRow(f);
-    if (fetchBox) body.append(fetchBox);
-    host.append(el("div", {class: "section-card"},
-      el("div", {class: "card-title collapsible-header", onclick: () => {
-        body.classList.toggle("collapsed");
-        S.prefsOpen[body.classList.contains("collapsed") ? "delete" : "add"](f.key);
-      }},
-        el("span", {text: f.prefs_title || ("Model Paths (" + f.display_name + ")")})), body));
-  }
   host.append(el("div", {class: "section-card"}, el("div", {class: "card-title"}, el("span", {text: "Reset"})),
     el("div", {class: "card-content"}, el("div", {class: "field-row"}, el("button", {class: "btn", text: "Reset to defaults",
       onclick: async (e) => {
         if (e.target.dataset.sure !== "1") { e.target.dataset.sure = "1"; e.target.textContent = "Reset? Click again"; return; }
         await api("/api/prefs", {reset: true});
         const pr = await api("/api/prefs");
-        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.outputPref = pr.lora_output_dir || ""; S.outputDefault = pr.output_default;
+        S.set = pr.settings || {}; S.setAbs = pr.abs || {}; S.outputPref = pr.lora_output_dir || "";
+        S.outputDefault = pr.output_default; S.modelInventory = pr.model_inventory || S.modelInventory;
         renderPrefs();
       }})),
-      el("div", {class: "field-hint", text: "Puts the folders and inference settings above back to Fizgig's defaults. " +
-        "Model files, the web password and the RunPod key are kept."}))));
+      el("div", {class: "field-hint", text: "Resets folder and inference settings, but keeps model files, passwords and the RunPod key."}))));
   paintFetch();
+  paintModelSearch();
 }
 
 // Search libraries on the Fizgig computer, not on the browser's host.
@@ -1096,6 +1265,7 @@ function paintModelSearch() {
         ". No model files downloaded."
       : st.state === "failed" ? "Search failed: " + st.error : "";
   if (S.modelSearchMessage) S.modelSearchMessage.textContent = msg;
+  if (S.mpSearchStatus) S.mpSearchStatus.textContent = msg;
   for (const [key, row] of Object.entries(S.fetchRows || {})) {
     if (row.searchStatus) row.searchStatus.textContent = st.family === key ? msg : "";
   }
@@ -1108,6 +1278,7 @@ async function pollModelSearch() {
   if (was === "running" && S.modelSearch.state === "done") {
     const pr = await api("/api/prefs");
     S.prefs = pr.models || {};
+    S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
     S.modelRoots = pr.model_search_roots || [];
     renderPrefs();
     checkModels();
@@ -1351,6 +1522,12 @@ function paintFetch() {
           "shows what went wrong)."})]));
     }
   }
+  for (const refs of Object.values(S.mpRows || {})) for (const row of refs) {
+    const active = busy && !!st.file && st.file.replaceAll("\\\\", "/").split("/").pop() === row.filename;
+    row.node.hidden = !active;
+    if (active) row.node.textContent = mpSize(st.done) + " / " + mpSize(st.total) +
+      " · " + mpSize(Math.max(0, st.total - st.done)) + " remaining";
+  }
   for (const [key, r] of Object.entries(S.fetchRows || {})) {
     r.btn.disabled = busy;
     r.status.innerHTML = "";
@@ -1379,7 +1556,9 @@ async function watchFetch() {
   const was = S.fetch && S.fetch.state;
   try { S.fetch = await api("/api/fetch"); } catch (e) { return; }
   if (was === "running" && S.fetch.state !== "running") {
-    S.prefs = (await api("/api/prefs")).models || {};    // the fetcher wrote the new paths
+    const pr = await api("/api/prefs");
+    S.prefs = pr.models || {};
+    S.modelInventory = pr.model_inventory || {files: {}, summary: {}};
     if (S.prefsOpen && S.fetch.family) S.prefsOpen.add(S.fetch.family);   // its card open, showing how it ended
     renderPrefs();
     checkModels();
