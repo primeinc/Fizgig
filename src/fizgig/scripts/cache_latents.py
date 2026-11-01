@@ -86,8 +86,11 @@ def encode_datasets(datasets, encode_fn, args):
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_cache_paths = []
+        from fizgig.training.progress import CacheProgress, dataset_items
+        shown = CacheProgress("pictures", dataset_items(dataset))
 
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+            shown.add(len(batch))
             # Ensure RGB (strip alpha)
             for item in batch:
                 if isinstance(item.content, np.ndarray) and item.content.shape[-1] == 4:
@@ -105,12 +108,30 @@ def encode_datasets(datasets, encode_fn, args):
                 # veto the skip for a file that exists and matches — MiniMax uses it for a
                 # clip cached without the still that --clip_still asks for.
                 _needs = getattr(args, "needs_reencode", None)
+
+                from fizgig.dataset.image_dataset import source_stamp
+
+                def _newer(item):
+                    """The picture changed since it was cached (same name, new pixels: an edited photo, a folder
+                    refilled with another person's photos, or LoRA Isolation's side-by-sides rebuilt from a new
+                    strangers set): its size and date against the stamp in the cache, either way; a cache without a
+                    stamp (written before it) by the picture being newer."""
+                    try:
+                        from safetensors import safe_open
+                        with safe_open(item.latent_cache_path, framework="pt") as f:
+                            was = (f.metadata() or {}).get("source")
+                        if was:
+                            return was != source_stamp(item.item_key)
+                        return os.path.getmtime(item.item_key) > os.path.getmtime(item.latent_cache_path)
+                    except Exception:           # unreadable: the size check above has the final say
+                        return False
                 batch = [item for item in batch
                          if not os.path.exists(item.latent_cache_path)
                          or _ID.latent_cache_matches_reso(item.latent_cache_path,
                                                           item.bucket_size,
                                                           dataset.architecture) is not True
-                         or (_needs is not None and _needs(item.latent_cache_path))]
+                         or (_needs is not None and _needs(item.latent_cache_path))
+                         or _newer(item)]
                 if not batch:
                     continue
 

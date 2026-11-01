@@ -190,6 +190,53 @@ def _convert_comfyui_qwen3vl_state_dict(sd: dict[str, Tensor]) -> dict[str, Tens
     return converted
 
 
+def qwen3_vl_size(model_path: str) -> str:
+    """"8b" for a Qwen3-VL-8B file (Qwen Image 2.1's text encoder, the bigger captioner: hidden size 4096, its own LM
+    head), else "4b" - read from the file's header, nothing loaded."""
+    from safetensors import safe_open
+    try:
+        with safe_open(model_path, framework="pt") as f:
+            for k in f.keys():
+                if k.endswith("embed_tokens.weight"):
+                    return "8b" if f.get_slice(k).get_shape()[-1] == 4096 else "4b"
+    except Exception:
+        pass
+    return "4b"
+
+
+def _qwen3_vl_config(model_path: str) -> dict:
+    if qwen3_vl_size(model_path) == "8b":
+        import json
+        with open(os.path.join(os.path.dirname(__file__), "..", "qwen_image21", "qwen3vl_8b_config.json"),
+                  encoding="utf-8") as f:
+            return json.load(f)
+    return QWEN3_VL_4B_INSTRUCT_CONFIG
+
+
+def _gpu_room_gb(device) -> float:
+    try:
+        d = torch.device(device)
+        if d.type != "cuda" or not torch.cuda.is_available():
+            return float("inf")
+        return torch.cuda.mem_get_info(d)[0] / 2 ** 30
+    except Exception:
+        return float("inf")
+
+
+def _gpu_total_gb(device) -> float:
+    try:
+        d = torch.device(device)
+        if d.type != "cuda" or not torch.cuda.is_available():
+            return float("inf")
+        return torch.cuda.mem_get_info(d)[1] / 2 ** 30
+    except Exception:
+        return float("inf")
+
+
+# what a caption needs on the card beside the weights: a 1 MP picture's vision tokens, the KV cache, the logits
+_CAPTION_WORK_GB = 2.5
+
+
 def _load_qwen3_vl_model(
     model_path: str,
     *,
@@ -197,10 +244,20 @@ def _load_qwen3_vl_model(
     device: torch.device | str,
     disable_mmap: bool = True,
 ) -> Qwen3VLForConditionalGeneration:
-    """Build Qwen3-VL-4B from the vendored config and load weights from a local safetensors."""
-    config = Qwen3VLConfig.from_dict(QWEN3_VL_4B_INSTRUCT_CONFIG)
+    """Build Qwen3-VL (4B, or the 8B Qwen Image 2.1 ships) from its vendored config and load weights from a local
+    safetensors. A model bigger than the card's free memory keeps what fits on the card and streams the rest of its
+    language layers from system RAM for each step (slower, but it runs). Only a model bigger than the whole card
+    streams: one that fits an empty card goes on it whole, as it did before streaming, even mid-run beside a training
+    model (#275 - streamed there, a stuck image's recaption moved every layer across for each word and ran for hours)."""
+    config = Qwen3VLConfig.from_dict(_qwen3_vl_config(model_path))
     with init_empty_weights():
         model = Qwen3VLForConditionalGeneration._from_config(config)
+    weights_gb = os.path.getsize(model_path) / 2 ** 30
+    room = _gpu_room_gb(device)
+    stream = weights_gb + _CAPTION_WORK_GB > _gpu_total_gb(device)
+    if stream:
+        logger.info(f"Qwen3-VL text encoder: {weights_gb:.1f} GB of weights, {room:.1f} GB free on the card - loading "
+                    "to system RAM and streaming the layers that don't fit")
 
     logger.info(f"Loading Krea 2 text encoder (Qwen3-VL) weights from {model_path}")
     # ComfyUI's fp8_scaled variant quantises ONLY the language Linears — its 315 vision-tower
@@ -215,7 +272,7 @@ def _load_qwen3_vl_model(
 
     # dtype=None on the fp8 path: passing a dtype converts the fp8 weights on load and there is
     # nothing left to be resident about.
-    sd = load_split_weights(model_path, device=str(device), disable_mmap=disable_mmap,
+    sd = load_split_weights(model_path, device="cpu" if stream else str(device), disable_mmap=disable_mmap,
                             dtype=(None if prequant else dtype))
     sd = _convert_comfyui_qwen3vl_state_dict(sd)
 
@@ -253,13 +310,38 @@ def _load_qwen3_vl_model(
             f"Qwen3-VL text encoder checkpoint did not match the model: missing={missing[:10]}, unexpected={unexpected[:10]}"
         )
 
-    model.to(device)
     # Never cast an fp8 model to dtype — that would convert the weights straight back to bf16 and
     # throw away the whole point. The unquantised parts (vision tower, norms, embeddings) are
-    # already stored in the target dtype anyway.
+    # already stored in the target dtype anyway. Cast before placing: a streamed model can't be
+    # moved or cast once its layers are offloaded.
     if dtype is not None and not prequant:
         model.to(dtype)
+    if stream:
+        _stream_layers(model, device, room)
+    else:
+        model.to(device)
     return model.eval().requires_grad_(False)
+
+
+def _stream_layers(model, device, room_gb):
+    """Everything but the language layers on the card (the vision tower, embeddings, final norm, LM head), then as
+    many language layers as fit beside a caption's working memory; the rest stay in system RAM and are moved to the
+    card for their forward only (accelerate's offload hooks), so a card smaller than the model still captions."""
+    from accelerate import dispatch_model
+    lm = model.model.language_model
+    nbytes = lambda m: sum(t.numel() * t.element_size() for t in list(m.parameters()) + list(m.buffers()))
+    layers = list(lm.layers)
+    fixed = (nbytes(model) - sum(nbytes(l) for l in layers)) / 2 ** 30
+    per = (sum(nbytes(l) for l in layers) / len(layers)) / 2 ** 30
+    fit = max(0, min(len(layers), int((room_gb - _CAPTION_WORK_GB - fixed) // per)))
+    dev = str(torch.device(device))
+    device_map = {"model.visual": dev, "model.language_model.embed_tokens": dev, "model.language_model.norm": dev,
+                  "model.language_model.rotary_emb": dev, "lm_head": dev}
+    for i in range(len(layers)):
+        device_map[f"model.language_model.layers.{i}"] = dev if i < fit else "cpu"
+    logger.info(f"Qwen3-VL text encoder: {fit} of {len(layers)} language layers on the card, {len(layers) - fit} "
+                f"streamed from system RAM ({per:.2f} GB each)")
+    dispatch_model(model, device_map=device_map, main_device=dev)
 
 
 def load_qwen3_vl_conditioner(
@@ -289,129 +371,9 @@ def load_qwen3_vl_conditioner(
     return conditioner.eval().requires_grad_(False)
 
 
-# Ordering comes from the community's structured-caption template (trigger, features, clothing,
-# pose, expression, setting, lighting, camera angle) — a fixed order is what makes a whole dataset's
-# captions structurally consistent, which is the part a per-image VLM otherwise gets wrong.
-#
-# What is deliberately NOT taken from that template: its advice to OMIT invariant features ("if your
-# character always has blue eyes, don't mention it"). That is SD1.5/SDXL-era guidance and it is
-# wrong here. On LLM-conditioned models the omit-to-bake-in trick is dead — unnamed features don't
-# bake in, unnamed CONTRADICTIONS fight, and the salient unnamed deviation is exactly the poison the
-# per-image loss watch keeps flagging. Naming a thing doesn't stop the model learning it; it binds
-# it to a token you can then steer. Hence "name anything prominent", not "omit what's constant".
-#
-# Two rules earned from real output (29 Jul):
-#   SUBJECT_RULE — the 4B model hedged to "a person" in roughly a third of captions. That is a
-#   worse token than "a woman": the dataset then teaches the trigger against an inconsistent
-#   subject noun, and the noun is the one word every caption shares.
-#   NO_PREAMBLE_RULE — it opened with "This image shows…" constantly on the longer tasks. The
-#   preamble is pure noise in a training caption and, prepended after the trigger, reads as
-#   "<trigger>, this image shows…". Belt and braces: the instruction asks, and
-#   _strip_caption_preamble removes it deterministically afterwards.
-SUBJECT_RULE = (
-    "Name the subject with the specific term that is visually apparent — 'a woman', 'a man', "
-    "'a girl', 'a boy' — and not the vague 'a person'. Use 'a person' only when the image "
-    "genuinely does not show enough to tell. "
+from fizgig.krea2.caption_text import (  # noqa: E402,F401  (the instructions: text only, kept apart)
+    SUBJECT_RULE, NO_PREAMBLE_RULE, CAPTION_INSTRUCTION, DETAILED_CAPTION_INSTRUCTION, ENCODE_SYSTEM_DESCRIPTOR, SHORT_CAPTION_INSTRUCTION, DETAILED_DESCRIPTION_INSTRUCTION, STYLE_CAPTION_INSTRUCTION, CAPTION_TASKS, DEFAULT_CAPTION_TASK,
 )
-NO_PREAMBLE_RULE = (
-    "Begin directly with the subject. Never open with 'This image shows', 'The image depicts', "
-    "'In this image', 'Here we see', 'The photo shows' or any similar preamble. "
-)
-
-CAPTION_INSTRUCTION = (
-    "Write one factual training caption for this image as a single sentence, covering these in "
-    "order: the subject and what they are doing; the camera viewpoint (e.g. 'viewed from behind', "
-    "'side profile', 'close-up') and whether the face is visible; their pose; their clothing; the "
-    "setting; the lighting. Use the same order and the same plain phrasing every time. "
-    + SUBJECT_RULE + NO_PREAMBLE_RULE +
-    "Name anything prominent a viewer would notice, especially anything unusual about the angle, "
-    "the framing, or what is hidden or cropped. State only what is visible — no speculation, no "
-    "proper names, no style or quality commentary."
-)
-
-# Second-attempt instruction: if the standard caption didn't unstick the image, the miss is
-# probably something salient the short caption skipped — go exhaustive so every visible element
-# that could contradict the conditioning gets named.
-DETAILED_CAPTION_INSTRUCTION = (
-    "Write a detailed factual training caption for this image, 2-4 sentences. Cover: the subject "
-    "and exactly how much of them is visible (state the camera viewpoint and explicitly whether "
-    "the face is visible or hidden), their pose and body position, every visible clothing item "
-    "with colors, hair style and color, any objects they hold or touch, anything partially "
-    "blocking or cropping the subject, the lighting, and the background/setting with its main "
-    "objects. " + SUBJECT_RULE + NO_PREAMBLE_RULE +
-    "State only what is visible — no speculation, no names, no style commentary."
-)
-
-
-# The system prompt used when ENCODING text for training and inference — NOT a captioning
-# instruction. It must stay byte-identical to ComfyUI's Text-Encode-(Krea2) node: changing it
-# would silently alter every cached embedding and desync training from ComfyUI. Module-level so
-# the GUI can display it read-only without duplicating the string.
-ENCODE_SYSTEM_DESCRIPTOR = (
-    "Describe the image by detailing the color, shape, size, texture, "
-    "quantity, text, spatial relationships of the objects and background:"
-)
-
-SHORT_CAPTION_INSTRUCTION = (
-    "Write one short factual caption for this image — a single clause naming the subject, what "
-    "they are doing, and the setting. " + SUBJECT_RULE + NO_PREAMBLE_RULE +
-    "State only what is visible. No speculation, no names, no style commentary."
-)
-
-DETAILED_DESCRIPTION_INSTRUCTION = (
-    "Describe this image in 2-3 factual sentences, starting with the subject: their pose and "
-    "clothing, the camera viewpoint, the lighting, and the setting. "
-    + SUBJECT_RULE + NO_PREAMBLE_RULE +
-    "State only what is visible — no speculation, no names, no style commentary."
-)
-
-# --- style captioning ------------------------------------------------------------------------
-# The identity instructions above are written for a dataset where the subject is a person and the
-# lighting, viewpoint and clothing all VARY — you name them so they stay steerable. A style dataset
-# inverts that: the look is the constant you are training, and the subject is whatever happens to
-# be in front of it. So the caption takes the content and leaves the style unnamed, which is what
-# lets the LoRA bind the look to the trigger word the GUI prepends.
-#
-# This instruction is deliberately SHORT, and that is the finding, not an oversight. Earlier
-# versions of this preset stacked four rule fragments — name the subject specifically, no preamble,
-# describe it as if it were a real place, never mention medium/technique/grade — and by the obvious
-# metric they won easily: on a layered paper-cut set they leaked style words into 1 caption in 9,
-# where this one-liner leaks into 7. But the one-liner is what trains better, tested on real runs
-# across both Krea 2 and Klein, and it is not close.
-#
-# The likely reason is worth keeping, because it cuts against the instinct to keep adding rules:
-#   - Leaking CONSISTENTLY is not the same failure as leaking half the time. A word in 7 captions
-#     of 9 behaves like a style tag; a word in 4 of 9 teaches the model that some of these images
-#     have a property the others lack. The rule stack was tuned against the wrong number.
-#   - The short instruction produces captions roughly 2.4x richer (~70 words vs ~30). More content
-#     named means more of the image accounted for, which leaves the style as the cleaner residual.
-#     The rules were buying leak-purity with detail, and detail is what the LoRA works from.
-#
-# Token budget is 160 rather than the ~90 the length implies: at 90 every caption on the test set
-# was cut off mid-word.
-STYLE_CAPTION_INSTRUCTION = (
-    "Describe the image with zero references to the image style, just the factual contents of "
-    "what is depicted."
-)
-
-# The task menu the Captions tab offers for this model. Lives here rather than in the GUI so the
-# trainer's auto-recaption and the GUI read the same text — the instruction is part of the
-# captioning contract, not a piece of UI.
-#   key -> (menu label, instruction, suggested max_new_tokens)
-# "training" is the default: it is the doctrine-aligned instruction auto-recaption already uses
-# (name the viewpoint, say whether the face is visible), which is what makes a caption safe to
-# train on rather than merely accurate.
-CAPTION_TASKS = {
-    "training":   ("Training caption (viewpoint-aware)", CAPTION_INSTRUCTION, 120),
-    "short":      ("Short caption", SHORT_CAPTION_INSTRUCTION, 60),
-    "detailed":   ("Detailed description", DETAILED_DESCRIPTION_INSTRUCTION, 160),
-    "exhaustive": ("Exhaustive detail", DETAILED_CAPTION_INSTRUCTION, 240),
-    # Style last: the four above are the identity path, which is the common case and the one
-    # auto-recaption uses.
-    "style":      ("Style — contents only (trigger word names the style)",
-                   STYLE_CAPTION_INSTRUCTION, 160),
-}
-DEFAULT_CAPTION_TASK = "training"
 
 
 _PREAMBLE_RE = re.compile(
@@ -467,7 +429,8 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path, *,
     # image_path is a path OR an already-opened PIL image. The second form exists because a
     # MiniMax H3 training item can be a video clip, and what gets captioned is a frame decoded
     # from it — there is no file on disk to hand over.
-    src = Image.open(image_path) if isinstance(image_path, (str, os.PathLike)) else image_path
+    from fizgig.utils.upright import open_upright
+    src = open_upright(image_path) if isinstance(image_path, (str, os.PathLike)) else image_path
     im = conditioner._cap_image(src, megapixels)
     # An explicit instruction wins (the Captions tab's task menu, or a user-edited one); otherwise
     # the historical detailed/standard pair, so existing callers are unaffected.

@@ -47,7 +47,8 @@ def _open_training_frame(path: str):
 
     ext = os.path.splitext(path)[1].lower()
     if ext not in VIDEO_EXTENSIONS:
-        return Image.open(path)
+        from fizgig.utils.upright import open_upright
+        return open_upright(path)
     try:
         import cv2
 
@@ -84,8 +85,8 @@ def _load_image_list(list_file: str) -> list[str]:
     return out
 
 
-def _write_caption(path: str, caption: str, trigger: str) -> None:
-    cap_path = os.path.splitext(path)[0] + ".txt"
+def _write_caption(path: str, caption: str, trigger: str, ext: str = ".txt") -> None:
+    cap_path = os.path.splitext(path)[0] + (ext or ".txt")
     text = f"{trigger}, {caption}" if trigger else caption
     with open(cap_path, "w", encoding="utf-8") as f:
         f.write(text)
@@ -194,7 +195,9 @@ def _run_job(state: CaptionState, job: dict) -> bool:
 
     images = _load_image_list(list_file)
     allowed = IMAGE_EXTENSIONS | (VIDEO_EXTENSIONS if include_video else set())
-    images = [p for p in images if os.path.isfile(p) and os.path.splitext(p)[1].lower() in allowed]
+    from fizgig.dataset.masks import is_mask_file
+    images = [p for p in images if os.path.isfile(p) and os.path.splitext(p)[1].lower() in allowed
+              and not is_mask_file(p)]
     total = len(images)
     if not total:
         print("FAIL: no images in list", flush=True)
@@ -233,7 +236,7 @@ def _run_job(state: CaptionState, job: dict) -> bool:
             if not caption:
                 print(f"FAIL: {base} (empty caption)", flush=True)
                 continue
-            _write_caption(path, caption, trigger)
+            _write_caption(path, caption, trigger, job.get("caption_ext") or ".txt")
             print(f"OK: {base}", flush=True)
         except Exception as exc:
             print(f"FAIL: {base} ({exc})", flush=True)

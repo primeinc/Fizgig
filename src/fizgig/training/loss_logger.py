@@ -20,6 +20,7 @@ typical LoRA default. For B>1 the step loss is the batch mean; we log it against
 and record the batch size so analysis can skip those.
 """
 import json
+import re
 import logging
 import os
 import time
@@ -135,6 +136,22 @@ class PerImageLossLogger:
             self._f = None
 
 
+def where(key, folders):
+    """(key prefix, folder, name in that folder) of a training key over {prefix: folder}, or (None, None, None).
+    A key is its folder's prefix ("" for the training folder, "outfits/red/" for a sub-folder, "s2:" for another
+    subject) + the picture's name without its extension; the longest matching prefix wins."""
+    key = str(key)
+    best = None
+    for p in folders or {}:
+        if key.startswith(p) and (best is None or len(p) > len(best)):
+            best = p
+    name = key[len(best):] if best is not None else ""
+    # a sub-folder's or another folder's picture whose folder isn't in the map is no picture of a folder that is
+    if best is None or "/" in name or re.match(r"(s\d+|reg):", name):
+        return None, None, None
+    return best, folders[best], name
+
+
 class PerImageLossWatch:
     """Online per-image difficulty watcher — the actionable layer on top of the passive logger.
 
@@ -167,7 +184,7 @@ class PerImageLossWatch:
                  exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2,
                  stuck_floor: float = 0.1, escalate_every: int = 2,
                  dataset_dir: str = None, caption_ext: str = ".txt", healthy_min: int = 3,
-                 plateau_patience: int = 2, plateau_min_epochs: int = 8):
+                 plateau_patience: int = 2, plateau_min_epochs: int = 8, family: str = "", folders=None):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -242,6 +259,10 @@ class PerImageLossWatch:
         # error term). One-way, except reset_key (a manual caption edit re-admits the image).
         self._incorrigible: set[str] = set()
         self._excluded: set[str] = set()
+        self.family = str(family or "")
+        # excluded by an earlier run of this family: trains normally, but is already past its two recaptions, so a
+        # confirmed stuck verdict excludes it at once (see _load_persistent_exclusions)
+        self._known_hard: set[str] = set()
         # Health record: epochs a key spent comfortably OUT of the hard zone (or in a proven good
         # run). An ever-healthy image (>= healthy_min epochs) has PROVEN learnability — its later
         # souring is the mined-out/drift pattern, not caption poison — so at the exclusion
@@ -269,15 +290,19 @@ class PerImageLossWatch:
         self.plateau_pending = 0
         self.best_epoch_estimate = None
 
-        # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder (exclusions are
-        # dataset knowledge — they travel with the images, across runs). Each entry snapshots the
-        # caption at exclusion time; if a later run finds the .txt changed (user fixed it offline),
-        # the entry auto-prunes and the image is re-admitted. Mid-run caption edits un-exclude via
-        # reset_key, which also removes the entry.
-        self.dataset_dir = dataset_dir
+        # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder, one entry per image with the
+        # families that excluded it. A later run of the same family does NOT skip the image (Peter, 5 Oct 2026: it
+        # taught the run until it got stuck, and "stuck" was that run's verdict): it trains normally, but is marked
+        # as past its two AI recaptions, so if it is confirmed stuck again it is excluded at once. Each entry
+        # snapshots the caption; a changed .txt (fixed offline) re-admits it fully. Mid-run caption edits clear
+        # it via reset_key, which also removes the entry. Entries from before per-family records count for every
+        # family. folders: {key prefix: folder} when the run trains several folders (sub-folders, other subjects):
+        # each folder keeps its own file, its entries named as in that folder, so the record travels with it.
+        self.folders = {p: d for p, d in (folders if folders is not None else {"": dataset_dir}).items()
+                        if d and os.path.isdir(d)}
+        self.dataset_dir = self.folders.get("")
         self.caption_ext = caption_ext
-        self._excl_file = (os.path.join(dataset_dir, "fizgig_excluded.json")
-                           if dataset_dir and os.path.isdir(dataset_dir) else None)
+        self._excl_file = bool(self.folders) or None
         self._excl_data: dict[str, dict] = {}
         self._load_persistent_exclusions()
 
@@ -287,10 +312,16 @@ class PerImageLossWatch:
 
     # ---- persistent exclusions -------------------------------------------------
 
+    def where(self, key: str):
+        """(key prefix, folder, name in that folder) of a training key, or (None, None, None) - the longest prefix
+        wins, so a sub-folder's pictures are never read as the training folder's own."""
+        return where(key, self.folders)
+
     def _current_caption(self, key: str):
-        if not self.dataset_dir:
+        _p, folder, name = self.where(key)
+        if not folder:
             return None
-        p = os.path.join(self.dataset_dir, os.path.basename(key) + self.caption_ext)
+        p = os.path.join(folder, name + self.caption_ext)
         try:
             # utf-8-sig + replace: a BOM or stray legacy byte must not make the caption-changed
             # comparison (the exclusion pardon) read as "unreadable" and keep an image excluded.
@@ -300,13 +331,17 @@ class PerImageLossWatch:
             return None
 
     def _load_persistent_exclusions(self) -> None:
-        if not self._excl_file or not os.path.exists(self._excl_file):
-            return
-        try:
-            with open(self._excl_file, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            logger.warning("[loss-watch] could not read fizgig_excluded.json — ignoring")
+        data = {}
+        for prefix, folder in self.folders.items():
+            path = os.path.join(folder, "fizgig_excluded.json")
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    data.update({prefix + str(k): v for k, v in json.load(f).items()})
+            except Exception:
+                logger.warning(f"[loss-watch] could not read {path} — ignoring")
+        if not data:
             return
         pruned = []
         for key, entry in dict(data).items():
@@ -315,70 +350,68 @@ class PerImageLossWatch:
                 # Caption changed since exclusion (fixed offline) — re-admit.
                 pruned.append(key)
                 del data[key]
-            else:
-                self._excluded.add(str(key))
+            elif "families" not in entry or self.family in entry["families"]:
+                self._known_hard.add(str(key))
                 self._incorrigible.add(str(key))
         self._excl_data = data
         if pruned:
             self._write_persistent_exclusions()
             logger.info(f"[loss-watch] re-admitted {len(pruned)} previously-excluded image(s) "
                         f"whose captions changed: " + ", ".join(os.path.basename(k) for k in pruned))
-        if self._excluded:
-            logger.warning(f"[loss-watch] {len(self._excluded)} image(s) excluded by a previous run "
-                           f"(fizgig_excluded.json) — they will be skipped. Edit their captions or "
-                           f"delete the file to re-admit them: "
-                           + ", ".join(sorted(os.path.basename(k) for k in self._excluded)))
+        if self._known_hard:
+            logger.info(f"[loss-watch] {len(self._known_hard)} image(s) were excluded by an earlier run "
+                        f"(fizgig_excluded.json): they train normally, and are excluded at once if they get stuck "
+                        f"again (their two AI recaptions are spent). Edit a caption to clear its record: "
+                        + ", ".join(sorted(os.path.basename(k) for k in self._known_hard)))
 
     def _write_persistent_exclusions(self) -> None:
         if not self._excl_file:
             return
-        try:
-            tmp = self._excl_file + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._excl_data, f, indent=2)
-            _atomic_replace(tmp, self._excl_file)
-        except Exception:
-            logger.warning("[loss-watch] could not write fizgig_excluded.json", exc_info=True)
+        per = {p: {} for p in self.folders}
+        for key, entry in self._excl_data.items():
+            prefix, _folder, name = self.where(key)
+            if prefix is not None:
+                per[prefix][name] = entry
+        for prefix, entries in per.items():
+            path = os.path.join(self.folders[prefix], "fizgig_excluded.json")
+            if not entries and not os.path.exists(path):
+                continue
+            try:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(entries, f, indent=2)
+                _atomic_replace(tmp, path)
+            except Exception:
+                logger.warning(f"[loss-watch] could not write {path}", exc_info=True)
 
     def _record_exclusion(self, key: str, epoch: int) -> None:
         if not self._excl_file:
             return
         import time
-        self._excl_data[key] = {"epoch": int(epoch),
-                                "date": time.strftime("%Y-%m-%d %H:%M"),
-                                "reason": "still stuck after two AI recaptions",
-                                "caption": self._current_caption(key)}
+        entry = self._excl_data.get(key) or {}
+        fams = dict(entry.get("families") or {})
+        fams[self.family or "?"] = {"epoch": int(epoch), "date": time.strftime("%Y-%m-%d %H:%M"),
+                                    "reason": "still stuck after two AI recaptions"}
+        self._excl_data[key] = {"families": fams, "caption": self._current_caption(key)}
         self._write_persistent_exclusions()
 
     def preflight(self, dataset_keys) -> None:
         """Reconcile persisted exclusion state with the actual training set (trainer calls this
-        once, after the dataloader is built). Prunes exclusion entries whose images have left
-        the dataset (they'd show as ghost rows in the popup and pad the file forever), and
-        refuses a state that excludes EVERY image — a run that trains on nothing is never what
-        anyone wants, whatever the file says."""
+        once, after the dataloader is built): prunes entries whose images have left the dataset
+        (they'd pad the file forever)."""
         try:
             keys = {str(k) for k in dataset_keys}
             if not keys:
                 return
-            ghosts = {k for k in self._excluded if k not in keys}
+            ghosts = {k for k in self._excl_data if k not in keys}
             if ghosts:
-                self._excluded -= ghosts
-                self._incorrigible -= ghosts
-                changed = False
                 for g in ghosts:
-                    if g in self._excl_data:
-                        del self._excl_data[g]
-                        changed = True
-                if changed:
-                    self._write_persistent_exclusions()
+                    del self._excl_data[g]
+                self._known_hard -= ghosts
+                self._incorrigible -= ghosts
+                self._write_persistent_exclusions()
                 logger.info(f"[loss-watch] pruned {len(ghosts)} stale exclusion entries for "
                             f"images no longer in the dataset")
-            if self._excluded and len(self._excluded) >= len(keys):
-                logger.warning("[loss-watch] fizgig_excluded.json excludes EVERY image in the "
-                               "dataset — ignoring it for this run so training can happen at all. "
-                               "Delete the file (or fix captions) to clear the exclusions properly.")
-                self._excluded.clear()
-                self._incorrigible.clear()
         except Exception:
             logger.warning("[loss-watch] preflight failed", exc_info=True)
 
@@ -707,13 +740,14 @@ class PerImageLossWatch:
                 if wm is not None and verdict != "excluded":
                     verdict, mult = "warmup", round(wm, 3)
                 s["verdict"] = verdict
+                s["earlier_exclusion"] = key in self._known_hard and verdict != "excluded"
                 s["multiplier"] = mult if (self.apply_lr or verdict == "warmup") else 1.0
                 new_mult[key] = mult
             self._mult = new_mult
             self.verdicts = {k: s["verdict"] for k, s in stats.items()}
 
-            # Excluded images loaded from fizgig_excluded.json are skipped from step 1 — they have
-            # no records, so give them stub report rows or they'd be invisible in the popup.
+            # An image excluded without records of its own (e.g. replayed resume history) still gets a stub report
+            # row, or it would be invisible in the popup.
             for k in self._excluded:
                 if k not in stats:
                     stats[k] = {"verdict": "excluded", "multiplier": 0.0, "mean_residual": 0.0,
@@ -964,6 +998,7 @@ class PerImageLossWatch:
         self._confirmed_stuck.discard(key)
         self._last_reported_stuck.discard(key)
         self._incorrigible.discard(key)
+        self._known_hard.discard(key)  # ...and clears an earlier run's exclusion record
         self._excluded.discard(key)   # a manual caption edit re-admits an excluded image
         self._retired.discard(key)    # ...and un-retires a retired one
         if key in self._excl_data:    # ...including from the persistent dataset-folder record

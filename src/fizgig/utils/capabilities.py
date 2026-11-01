@@ -170,6 +170,14 @@ def detect() -> Capabilities:
     except Exception:
         caps.vram_free_gb = caps.vram_gb
         caps.notes.append("could not read free VRAM — using card total")
+    sim = os.environ.get("FIZGIG_SIM_VRAM_GB", "").strip()
+    if sim:                       # the small-card simulator: the compile checks see the simulated card, as planning does
+        try:
+            from fizgig.utils.device import plannable_free_vram
+            caps.vram_gb = min(caps.vram_gb, float(sim))
+            caps.vram_free_gb = min(caps.vram_free_gb, plannable_free_vram() * 1e9 / 1024 ** 3)
+        except ValueError:
+            pass
 
     caps.fp8_matmul = _probe_scaled_mm(torch.float8_e4m3fn) if not caps.is_rocm else False
     caps.int8_matmul = _probe_scaled_mm(torch.int8)     # expected False: _scaled_mm is fp8-only
@@ -453,7 +461,12 @@ def _available_ram_gb():
             return ms.ullAvailPhys / 2**30, ms.ullTotalPhys / 2**30
         with open("/proc/meminfo") as f:
             info = {l.split(":")[0]: int(l.split()[1]) for l in f if ":" in l}
-        return info["MemAvailable"] / 2**20, info["MemTotal"] / 2**20
+        avail, total = info["MemAvailable"] / 2**20, info["MemTotal"] / 2**20
+        from fizgig.utils.container_ram import container_ram
+        c = container_ram()                       # a pod: its own limit, not the host's RAM
+        if c is not None and c[0] / 2**30 < total:
+            avail, total = min(avail, c[1] / 2**30), c[0] / 2**30
+        return avail, total
     except Exception:
         return None, None
 
@@ -690,6 +703,30 @@ def compile_boundary(quant_4bit: bool, quant_int8: str, vram_gb=None, caps=None,
     return "inside"
 
 
+def compile_blocker(blocks_to_swap: int, caps: Optional[Capabilities] = None) -> Optional[str]:
+    """Why Auto must not compile on this machine / run (ROCm, block swap, no or mismatched triton, no host C
+    compiler), or None. Shared by Krea 2's rule (should_compile) and the generic family rule."""
+    caps = caps or detect()
+    if caps.is_rocm:
+        return ("ROCm/HIP PyTorch build — Auto leaves torch.compile off "
+                "(recompiles per bucket shape on HIP; set Compile Blocks to On to override)")
+    if blocks_to_swap:
+        return "block swap is active — swapping moves weights between devices every step, " \
+               "which compiled graphs cannot tolerate"
+    try:
+        import triton  # noqa: F401
+    except Exception:
+        return "triton is not installed (pip install triton-windows on Windows)"
+    _ok, _why = triton_matches_torch()
+    if not _ok:
+        return _why
+    if not has_host_c_compiler():
+        return ("no C compiler on this system — inductor/triton build host-side stubs "
+                "with one at runtime (on Debian/Ubuntu: apt install gcc); "
+                "running uncompiled")
+    return None
+
+
 def should_compile(total_steps: int, quant_4bit: bool, quant_int8: str,
                    blocks_to_swap: int, vram_gb: Optional[float] = None,
                    caps: Optional[Capabilities] = None, mp: float = 0.25,
@@ -704,27 +741,10 @@ def should_compile(total_steps: int, quant_4bit: bool, quant_int8: str,
     which is why only the compile gate needs them at this strength.
     """
     caps = caps or detect()
-    if caps.is_rocm:
-        return False, (
-            "ROCm/HIP PyTorch build — Auto leaves torch.compile off "
-            "(recompiles per bucket shape on HIP; set Compile Blocks to On to override)"
-        )
+    _blocked = compile_blocker(blocks_to_swap, caps)
+    if _blocked:
+        return False, _blocked
     vram = vram_gb if vram_gb is not None else (caps.vram_free_gb or caps.vram_gb)
-
-    if blocks_to_swap:
-        return False, "block swap is active — swapping moves weights between devices every step, " \
-                      "which compiled graphs cannot tolerate"
-    try:
-        import triton  # noqa: F401
-    except Exception:
-        return False, "triton is not installed (pip install triton-windows on Windows)"
-    _ok, _why = triton_matches_torch()
-    if not _ok:
-        return False, _why
-    if not has_host_c_compiler():
-        return False, ("no C compiler on this system — inductor/triton build host-side stubs "
-                       "with one at runtime (on Debian/Ubuntu: apt install gcc); "
-                       "running uncompiled")
 
     kind = "nf4" if quant_4bit else ("int8" if quant_int8 else None)
     if kind is None:

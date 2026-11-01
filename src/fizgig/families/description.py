@@ -2,8 +2,8 @@
 
 Adding a family used to mean threading it through the GUI by hand (predicates, if-chains, Preferences
 blocks, preset dicts, command builders). A description holds the family's facts once; the GUI's generic
-paths read it. Klein, Krea 2 and MiniMax H3 are NOT described here: they keep their existing code paths
-untouched until this system has proven itself on a new family (Peter, 25 Sep 2026).
+paths read it - its Preferences section, Base Model rows, Multi Concept, Samples wording and queue summary
+included, so a new family plugs in without per-family GUI code.
 
 Every value that came from outside Fizgig carries its source (`source=` fields), so a later reader can
 re-check it when the upstream model or a speed LoRA moves on.
@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+# the Samples tab's long-standing negative prompt, the default for the families that shipped with it
+GENERAL_NEGATIVE = ("blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate "
+                    "objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors")
 
 
 @dataclass(frozen=True)
@@ -28,6 +33,69 @@ class ModelFile:
     role: str = ""                    # "dit" | "vae" | "text_encoder" | "training_adapter" | "speed_lora" |
     #                                   "preview_dit" (a separate model the workbench previews on, e.g. a distilled
     #                                   checkpoint; see preview_checkpoint_sampling) | ""
+    # Preferences row extras: the longer text under the row (else `note`), the Download link's label and the line
+    # beside it (else "~N GB - repo -> file"), and a second link to another build of the same file
+    hint: str = ""
+    download_label: str = ""
+    download_note: str = ""
+    alt_repo: str = ""
+    alt_path: str = ""
+    alt_label: str = ""
+    alt_note: str = ""
+    # "Download models for me" offers a pick between this file and its alt (names for the two, e.g. ("MOSS-Image
+    # Base", "Kromoss")); the picked one is fetched and the pref moved to it. alt_size_gb: the alt's size
+    fetch_choice: tuple = ()
+    alt_size_gb: float = 0.0
+    gated: bool = False               # the repo needs an accepted licence + a Hugging Face token to download
+    # earlier versions of this file (names in models/): a pref still pointing at one is moved to this file by the
+    # downloads (fetch_models) and the updater, where any other file there is the user's own choice and kept
+    replaces: tuple = ()
+    # the download button fetches it only with the section's optional tick (description.fetch_optional_label);
+    # None = not required -> optional
+    fetch_optional: Optional[bool] = None
+    # False: left out of "Download models for me" altogether - the row's own Download link only (a file nobody needs
+    # by default, kept so a user can add it: MOSS-Image's Turbo LoRA)
+    bulk_fetch: bool = True
+    # downloaded by the feature that uses it, the first time it is used (MOSS-Image's SFT look LoRA: its Samples
+    # tick), into the models folder with its Preferences row set; not by "Download models for me" (bulk_fetch False)
+    fetch_on_use: bool = False
+    # a file added after most users set the family up: its line in the one-time "new model files" popup (shown when
+    # the family's DiT is set but this file is not; description.announce_intro opens it). "" = never announced
+    announce: str = ""
+    # a part that ships inside another model file (a single-file checkpoint's VAE / text encoders): the pref key of
+    # that file, used when this row is left empty - the row stays as an optional override (e.g. a fixed VAE)
+    inside: str = ""
+    # another family's Preferences row for the same file (Z-Image Base's VAE / text encoder / Turbo DiT are Z-Image
+    # Turbo's): Download models for me links this row to that file when it is set and on disk, instead of fetching a
+    # second copy into the models folder
+    same_as: str = ""
+
+    @property
+    def fetch_is_optional(self) -> bool:
+        """Whether the download button leaves this file to the optional tick. A training adapter is never optional
+        by default: it isn't required to start a run, but training without it is the wrong run (Peter, 9 Oct 2026 -
+        Qwen's and Z-Image's adapters had slipped into optional through `required=False`)."""
+        if self.fetch_optional is not None:
+            return bool(self.fetch_optional)
+        return not self.required and self.role != "training_adapter"
+
+
+@dataclass(frozen=True)
+class TextEncoderBuild:
+    """Another build of a family's text encoder (another precision of the same weights, or a variant such as an
+    abliterated fine-tune) that the family's own loader takes, measured against the default file with
+    scripts/check_te_builds.py (docs/drivers/README.md, "Text encoder builds"). A helper uses the index to fetch the
+    exact build a lead's run uses (found by hash) for a training share, and the lightest close build to try prompts
+    on another computer's epochs."""
+    label: str                        # "int8 (convrot)", "Huihui abliterated, fp8"
+    repo: str                         # Hugging Face repo
+    path: str                         # file in the repo
+    size_gb: float
+    sha256: str                       # the file's hash (its LFS etag): a file on disk is this build if it hashes to it
+    cosine: float                     # its conditioning next to the default file's on check_te_builds' prompts
+    variant: bool = False             # different weights (a fine-tune), not just another precision: conditions
+    #                                   differently on purpose, so never picked as a lighter stand-in
+    note: str = ""
 
 
 @dataclass(frozen=True)
@@ -59,6 +127,7 @@ class SpeedLoRA:
     community_settings: tuple = ()    # (description, source) pairs: how people actually use it
     caveats: tuple = ()
     source: str = ""
+    gallery_note: str = ""            # shown in the samples gallery's Turbo line while it renders the previews
 
 
 @dataclass(frozen=True)
@@ -71,6 +140,10 @@ class LoRAFormat:
     alpha_key: str = "{prefix}.alpha"
     kohya: bool = False               # True = the lora_unet_ convention used by Klein/Krea 2/H3
     file_prefix: str = ""             # what precedes a module path in every key, e.g. "transformer."
+    # a kohya family's LoKR keys: LyCORIS's 'diffusion_model.<module path>' by default (ComfyUI's own names on Klein,
+    # Krea 2, H3, Anima); True writes them on the LoRA's lora_unet_ stems instead, for a model loaded under other
+    # names than ComfyUI's (SDXL: diffusers in Fizgig, LDM in ComfyUI)
+    lokr_kohya_stems: bool = False
     note: str = ""
     source: str = ""
 
@@ -89,6 +162,156 @@ class LoRAFormat:
 
 
 @dataclass(frozen=True)
+class ClipSpec:
+    """What a video family's clips must be (descriptions with "clip" in media). The dataset decodes and checks every
+    clip against it, and the launch refuses an off-spec clip with the reason before anything caches
+    (families/clips.py) - Fizgig never converts one."""
+    fps: int = 24
+    frame_step: int = 17              # frame counts frame_offset + n * frame_step (H3: 17n + 5), up to max_frames
+    frame_offset: int = 5
+    max_frames: int = 124
+    edge_multiple: int = 32           # width and height
+    audio_rate: int = 32000
+    audio_channels: int = 2
+    mute_suffix: str = "_mute"        # a clip named ..._mute trains its pictures only
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class VideoCheckpoint:
+    """One choice in a video workbench's checkpoint picker."""
+    label: str                        # the picker's words (saved setups name it by these)
+    role: str                         # the model file it loads ("dit", "ref_dit", ...)
+    references: bool = False          # its pictures are references the clip should look like, not first/last frames
+
+
+@dataclass(frozen=True)
+class VideoWorkbench:
+    """A video family's workbench controls (Studio's clip settings, RefMod Toolkit's): the choices each picker offers,
+    the first of each the default unless a default is named."""
+    lengths: tuple = ()               # (label, frames)
+    sizes: tuple = ()                 # edge lengths for width and height
+    default_size: tuple = (768, 640)  # (width, height)
+    default_length: str = ""
+    scales: tuple = ()                # (label, factor): the dial canvas
+    checkpoints: tuple = ()           # VideoCheckpoint, Studio's picker
+    bases: tuple = ()                 # (label, the engine's base_mode)
+    refmod_checkpoints: tuple = ()    # RefMod Toolkit's picker (its saved setups' words)
+    refmod_lengths: tuple = ()        # (label, frames)
+    refmod_size: tuple = (640, 768)
+    sweep_frames: int = 22            # a RefMod sweep's clips: a still doesn't show what a RefMod does
+    # Studio's Speed Boost tick (on by default): the first half of a clip's steps at half size, then full size. The
+    # family's sampler honours speed_boost=True (H3: minimax/sampling.py with minimax/speed_boost.py)
+    speed_boost: bool = False
+
+    def checkpoint(self, label, refmod=False) -> VideoCheckpoint:
+        """The checkpoint a picker label names (the first when it names none)."""
+        pool = (self.refmod_checkpoints if refmod else self.checkpoints) or self.checkpoints
+        return next((c for c in pool if c.label == label), pool[0])
+
+    def base_mode(self, label) -> str:
+        return dict(self.bases).get(label, self.bases[0][1] if self.bases else "auto")
+
+
+@dataclass(frozen=True)
+class FamilyOption:
+    """A family's own control on the Training (or Samples) tab: a dropdown, an entry or a tick whose value becomes
+    launch tokens. A token is "name=value" (the driver's --family_option), "--flag=value" or "--flag" (a trainer
+    flag), or "aux:name=value" (the cache stages' --aux). "{}" in a token is the entry's text; "pref:KEY" in a value
+    is that Preferences file's path. A family with clips, sound or several bases (H3) declares what has no generic
+    home this way, and a future family declares its own the same way."""
+    key: str                          # where the GUI keeps the value (and the old setting it maps, via `setting`)
+    label: str
+    kind: str = "choice"              # "choice" | "entry" | "check" | "fixed" (always sent, no control)
+    choices: tuple = ()               # choice: (label, tokens) pairs, the first the default
+    tokens: str = ""                  # entry: tokens with "{}" for the text (sent only when the text is set);
+    #                                   check: tokens sent when ticked
+    default: str = ""                 # entry text / "1" for a ticked check; a choice defaults to its first label
+    hint: str = ""                    # the grey line under the control
+    warn: str = ""                    # an amber line under the hint (web), with `warn_link` (an href) after it
+    warn_link: str = ""
+    featured: bool = False            # the row stands out (web): a soft accent panel, for a control worth noticing
+    choice_hints: tuple = ()          # (label, amber line) shown while that choice is picked
+    choice_notes: tuple = ()          # (label, grey line) shown in place of the hint while that choice is picked
+    choice_values: tuple = ()         # choice: the old setting's value each choice stands for, in choice order
+    #                                   ("60", "8", ""); "" marks the custom choice any other value lands on
+    tab: str = "training"             # "training" | "samples" | "model" (the Training Base row under the Base
+    #                                   Model picker: never in a preset, carried by Last Train and the queue)
+    # training tab: "" = Training Parameters (under Network Type), "after" = Training Parameters below the "Read at
+    # launch" line, "other" = Other Options; a fine-tune option (mode "finetune") sits in the fine-tune card
+    section: str = ""
+    inline: bool = False              # on the previous option's row, after its control (the label as plain text)
+    compact: bool = False             # label and control side by side across the row, not in the label column
+    width: int = 0                    # the control's width in characters (0 = sized to its choices)
+    suffix: str = ""                  # a grey note beside the control ("% of steps")
+    hint_indent: int = 0              # extra left indent of the hint, in pixels
+    pady: tuple = (8, 0)              # the control row's vertical padding
+    hint_pady: tuple = (0, 4)         # the hint's vertical padding
+    always_shown: bool = False        # `requires` decides what is SENT; the row shows regardless
+    # while `requires` is not met the control greys out and shows (required choice label, hint, side note)
+    unmet_notes: tuple = ()
+    counts_blocks: int = 0            # a block-spec entry: the side note counts the blocks it means (of this many)
+    setting: str = ""                 # the old settings key this option's value is read from on first use
+    show_if_media: str = ""           # shown only when the dataset holds this media kind ("clip", "voice")
+    mixed_only: bool = False          # shown only when the dataset mixes voice with photos or clips
+    isolation_off: bool = False       # a check that can't run with Fizgig LoRA Isolation: off and greyed while it's on
+    requires: str = ""                # shown (and sent) only while this check is ticked ("KEY") or this choice is
+    #                                   picked ("KEY=LABEL", matched as pick() matches)
+    suggestions: tuple = ()           # entry: ready-made values offered in an editable dropdown ("6-49 · why")
+    mode: str = ""                    # "finetune": shown and sent for a fine-tune only; "lora": for a LoRA only
+    # a queued run's one-line summary shows this while the option is away from its default ("{}" = its value;
+    # a check shows it while ticked); "" = never shown
+    summary: str = ""
+    # entry: a Split mode beside the single value - (first value, epochs, value after) to start it with; the value
+    # is then "first:epochs:after" (one text, so presets, Last Train and the queue carry it as any entry), and
+    # `split_hint` replaces the hint while Split is picked
+    split: tuple = ()
+    split_hint: str = ""
+    # entry: a Slide mode (with or without Split) - (first value, hold to epoch, value after, reached by epoch[, every
+    # N epochs after]); the value is then "first:hold:after:by", a straight line from the hold epoch to the last, and
+    # with the tick ":N", after it the higher value with every Nth epoch at the lower; `slide_hint` replaces the hint
+    slide: tuple = ()
+    slide_hint: str = ""
+    single: str = ""                  # Single's value to start with when the default is a Split or Slide value
+
+    def choice_labels(self):
+        return [c[0] for c in self.choices]
+
+    def pick(self, value):
+        """The choice label for a stored value: itself, else the label that contains it (an old setting's value -
+        "ref2va" -> "Reference (ref2va)") or that it starts with, else the first (the default)."""
+        v = str(value or "").strip()
+        labels = self.choice_labels()
+        if v in labels:
+            return v
+        if self.choice_values and v:
+            for lab, cv in zip(labels, self.choice_values):
+                if cv and v == cv:
+                    return lab
+            for lab, cv in zip(labels, self.choice_values):
+                if cv == "":
+                    return lab           # an old value no choice names: the custom choice
+        low = v.lower()
+        for lab in labels:
+            if low and (low in lab.lower() or lab.lower().startswith(low.split(" ")[0])):
+                return lab
+        return labels[0] if labels else ""
+
+    def resolve(self, value):
+        """The tokens this option sends for `value` (a choice label, entry text or "1"/"" for a check)."""
+        if self.kind == "choice":
+            return dict(self.choices).get(self.pick(value), "").split()
+        if self.kind == "fixed":
+            return self.tokens.split()
+        if self.kind == "check":
+            return self.tokens.split() if str(value) in ("1", "True", "true") else []
+        import re
+        text = str(value or "").split("·")[0].strip()          # a suggestion's label: its value before the "·"
+        text = re.sub(r"\s*\([^()]*\)$", "", text)            # an old label's note: "0.05 (default)" -> "0.05"
+        return [t.replace("{}", text) for t in self.tokens.split()] if text else []
+
+
+@dataclass(frozen=True)
 class FamilyDescription:
     # identity
     key: str                          # family key (the workbench vocabulary), e.g. "qwen_image21"
@@ -98,13 +321,64 @@ class FamilyDescription:
     lora_name_suffix: str
     aliases: tuple = ()
     experimental: bool = True
+    # registered (the shared cache / trainer find it) but not offered in the GUI yet - a family mid-port
+    hidden: bool = False
 
     # model files (Preferences rows, in display order)
     model_files: tuple = ()
+    # other builds of the text encoder the family's loader takes (TextEncoderBuild), measured against the default
+    text_encoder_builds: tuple = ()
     text_encoder_label: str = ""
     vae_label: str = ""
-    # a tip under the family's Preferences section (e.g. filling the paths by hand from a ComfyUI install)
+    # the name its workbench files (Repair Studio presets folder, metrics table) were kept under before the family
+    # moved to the driver system ("klein"); "" = its key
+    shares_prefs_with: str = ""
+    # the family's Preferences section: its title ("" = "<display name> model paths"), the paragraph under the title
+    # ("" = a generic line), a tip at its foot (e.g. filling the paths by hand from a ComfyUI install), the line under
+    # the download button ("" = generated) and the label of the button's optional tick ("" = no tick: every file
+    # fetches)
+    # a line under the Training tab's Base Model picker while the family is selected (e.g. what its previews are)
+    model_note: str = ""
+    # an orange status line under the Training tab's model picker (e.g. support that is new and changing daily)
+    status_note: str = ""
+    # a grey note beside Load Preset while that preset is the selection: (preset name, note) pairs
+    preset_notes: tuple = ()
+    # an edit family whose workbench reference has a strength (the latents scaled by it), and whose travel renders can
+    # chain - each frame also edits the previous frame's clean latent (LoRA Royale's sequential reference); the
+    # original Klein engine's _build_ref_tokens. Shows the Strength boxes and the Sequential reference ticks
+    reference_strength: bool = False
+    # the Extract tab's presets: (name, ((block id, multiplier), ...)) - the blocks kept and the scale each is
+    # extracted at; an empty block list = every block. The tab adds Custom (a block pick). () = all blocks only
+    extract_presets: tuple = ()
+    # the Samples tab's wording for the family, as (place, text) pairs over the generic text - places: "banner",
+    # "advanced", "flow", "neg", "cfg", "steps", "sampler" (added after the Steps line: the sampler and schedule
+    # previews use, for a family sensitive to them) and "prompts" (a note above the Prompts box); samples_cfg_free: previews render without CFG on a fixed schedule,
+    # so the Advanced card (flow shift, negative, CFG) and the sample-model / reference rows hide
+    samples_text: tuple = ()
+    samples_cfg_free: bool = False
+    prefs_title: str = ""
+    prefs_intro: str = ""
     prefs_note: str = ""
+    fetch_note: str = ""
+    fetch_optional_label: str = ""
+    # the "new model files" popup's opening line (the files themselves: ModelFile.announce)
+    announce_intro: str = ""
+
+    # what one training item may be: "photo", "clip" (frames + optional sound), "voice" (sound only)
+    media: tuple = ("photo",)
+    # Multi Concept: extra subject folders, each its own dataset block, on every family (Standard LoRA and fine-tune;
+    # an edit's or a pair slider's first folder has a partner folder). H3: reference distillation pairs each image
+    # only with others of its own subject - the reference rotation runs per block). multi_concept_defaults: the family
+    # options a click on the box sets ((option key, value) pairs, still editable after); multi_concept_hint: a line
+    # added to the box's hint
+    multi_concept: bool = True
+    # The Subjects card's "Your subject and other people" (DOP, and Fizgig LoRA Isolation on top of it): False hides
+    # both and the run trains as a normal LoRA (a music model has no people in a picture to keep apart)
+    subject_isolation: bool = True
+    multi_concept_defaults: tuple = ()
+    multi_concept_hint: str = ""
+    clip_spec: Optional[ClipSpec] = None
+    video_controls: Optional[VideoWorkbench] = None     # a video family's workbench pickers (VideoWorkbench)
 
     # latent rules
     latent_channels: int = 16
@@ -128,28 +402,122 @@ class FamilyDescription:
     training_adapter: str = ""        # pref key of the family's frozen training adapter ("" = none)
     training_adapter_note: str = ""   # one line for the Training tab under the adapter toggle
     ema_default: str = ""             # default EMA decay for the Training tab ("0.98", "Off"); "" = no EMA control
+    ema_short_run: bool = False       # the EMA dropdown also offers "Short run" (decay sized to the run - H3's)
+    # a saved state with no architecture tag is this family's own (the old H3 trainer wrote the same layout and
+    # parameter order): resume restores its optimizer and EMA too, not just the LoRA
+    resumes_untagged_states: bool = False
     implementation: str = ""          # SAI modelspec.implementation (reference repo URL)
     precisions: tuple = ("bf16",)     # base precisions offered for training: any of "bf16", "int8", "nf4"
     # what Auto may choose, in order ((): every offered precision, most precise first). Krea 2: INT8, then NF4 - its
     # original trainer's order; bf16 stays a manual choice
     auto_precisions: tuple = ()
+    # the Training tab's names for the precision choices where the shared ones mislead (Klein: "bf16" loads the file
+    # as it is, which for BFL's fp8 file trains in fp8), and the hint under the dropdown ("" = the shared hint)
+    precision_labels: dict = field(default_factory=dict)
+    precision_hint: str = ""
     # the driver can torch.compile its blocks (FamilyDriver.compile_blocks); the Training tab's Compile Blocks
     # control shows and the launch sends --compile_blocks
     compiles: bool = False
+    # the generic Auto compile rule (FamilyDriver.compile_plan) for a family whose driver does not bring its own:
+    # {base precision: steps after which compile has paid back its warm-up}, measured; a precision missing here is
+    # not compiled by Auto (On still compiles). compile_boundary: where the gradient checkpoint sits ("inside" the
+    # compiled graph - faster, more memory - or "outside" - eager-level memory); compile_fullgraph: refuse graph
+    # breaks rather than degrade quietly.
+    compile_payback_steps: dict = field(default_factory=dict)
+    compile_boundary: str = "inside"
+    compile_fullgraph: bool = True
+    # measured peak GB when compiled: {precision: {"inside" | "outside": ((megapixels, GB), ...)}}. With it the compile
+    # plan checks free VRAM: the family's boundary if it fits, else the checkpoint outside the graph, else uncompiled.
+    # {} = no memory check (the compiled peak is no bigger than eager's)
+    compile_memory: dict = field(default_factory=dict)
+    # the Training tab's hint under Compile Blocks: this family's measured figures
+    compile_hint: str = ""
     # previews can take the Samples tab's reference image through the text encoder's vision path ('prompt from a
     # picture', Krea 2) - conditioning only, not an edit reference (edit_training)
     preview_image: bool = False
     # how the workbench samples its preview checkpoint (the model file with role "preview_dit"), which it uses by
     # default for fast previews when the file is set; None = the family has none
     preview_checkpoint_sampling: Optional[SamplingSettings] = None
+    # the optimizer state waits on CPU while the previews render (H3: ~2.5 GB of dead weight for a no-grad render)
+    preview_park_optimizer: bool = False
     # a full fine-tune of the base model is offered (the driver's ft_spec returns its FTSpec, families/ft.py): the
     # Training tab shows the fine-tune card and the launch sends --finetune. Optional - most families never need it
     finetune: bool = False
+    ft_learning_rate: float = 1e-5    # the learning rate choosing Fine-tune sets (H3's tested rate is 3e-5)
+    # the family's own values a kind of training sets when it's picked ((kind, ((key, value), ...)), ...): MOSS-Image's
+    # Clean-end share differs for a fine-tune and a LoRA
+    kind_values: tuple = ()
+    ft_regularisation: bool = True    # the fine-tune card offers a regularisation set (photos of the broad class)
+    # the Training tab's large-dataset hint: (rate, steps per epoch) - a standard LoRA whose learning rate (or
+    # adaptive Min LR) is at least `rate`, on more than `steps` steps an epoch, gets a tip suggesting a cooler rate,
+    # so the best point doesn't fall between two saved epochs. None turns the hint off for the family
+    lr_hint: tuple = (2e-4, 125)
+    # the Training tab's small-dataset hint: (pictures, text) - a standard LoRA whose training folder holds fewer than
+    # `pictures` gets the text (its {n}: the count) beside Max Epochs. () = none
+    small_dataset_hint: tuple = ()
+    # the Training tab's long-run hint: (epochs, title, text) - a standard LoRA set to at least `epochs` epochs gets a
+    # tip card beside Max Epochs (a playback tip: no button). () = none
+    long_run_hint: tuple = ()
+    # the Captions tab's "Caption Every Song" card: every audio file gets "<trigger>, <common words>", no AI. The
+    # string is the greyed example shown in the empty Common words box. "" = no card
+    song_captions: str = ""
+    # the Samples tab's first preview prompt for this family; "" = form.DEFAULTS' "A high quality photo" (a photo model)
+    sample_prompt: str = ""
+    # training previews may render on the preview checkpoint (the preview_dit file, sampled with
+    # preview_checkpoint_sampling) instead of the training model - Klein's Distilled previews. The driver brings the
+    # memory handoff (park_for_preview / load_preview_checkpoint / unpark_after_preview)
+    train_preview_checkpoint: bool = False
+    # its Samples tab tick: the label, whether it starts ticked (each family's choice is then kept), and the Steps note
+    # a LoRA for previews of the training model only (MOSS-Image's SFT look LoRA: on the Base, previews look more like
+    # SFT, without loading it): the Samples tab tick with this label, its hint, the strength it renders at. Its file
+    # is the model file with role "look_lora", downloaded the first time the tick is used. Never in training, never
+    # on a preview checkpoint; on CPU between previews
+    preview_look_tick: str = ""
+    preview_look_hint: str = ""
+    preview_look_bold: str = ""       # a bold line under that hint
+    # the gallery's lightbox: a line over an enlarged preview saying how it was made, from the run's record of each
+    # preview round - (setup, text) pairs for "checkpoint" (the preview checkpoint), "look" (the training model with
+    # the preview look LoRA), "base" (the training model alone) and "turbo" (put before the others' when the Turbo
+    # LoRA was on). Empty = no line (a family opts in)
+    preview_labels: tuple = ()
+    preview_look_strength: float = 1.0
+    # the workbench tabs' choice while the Samples tab previews on the training model (its preview-checkpoint tick
+    # off): render on the preview checkpoint (the default: what most people generate with) or follow the Samples tab,
+    # its preview look LoRA included. One choice per family, kept in prefs (workbench_render_<key>). Needs
+    # workbench_follows_samples and workbench_checkpoint_follows_tick
+    workbench_render_choice: bool = False
+    preview_checkpoint_tick: str = "Use Distilled model for samples (4-step, matches ComfyUI)"
+    preview_checkpoint_on: bool = True
+    # (tensor name, sum) that identifies the model's own released Base (families/base_check.py): with any other Base
+    # DiT (a fine-tune of it, SFT) the preview-checkpoint tick defaults off - previews render on the model the LoRA
+    # will be used on. () = no check
+    standard_base: tuple = ()
+    # a changed default moved in saved forms: ((key, old value, new value[, only while this key is above 0]), ...).
+    # Each form moves once (a marker is saved with it), so a value chosen after that stays
+    value_moves: tuple = ()
+    # the preview checkpoint that never takes the speed LoRA, as (tensor name, sum); any other preview checkpoint
+    # does (MOSS-Image: SFT doesn't, Kromoss does). () = previews on a checkpoint never take it
+    checkpoint_speed_except: tuple = ()
+    preview_checkpoint_steps_note: str = "Base samples only — Distilled is locked at 4 steps"
     # measured training memory for the Auto plan: {precision: (peak GB with no block swap, GB saved per swapped
     # block)}; the peak may instead be ((megapixels, GB), ...) points, interpolated for the run's resolution.
     # {} = Auto just takes the first precision
     train_memory: dict = field(default_factory=dict)
+    # the same peak with gradient checkpointing OFF, compiled blocks, no swap: {precision: ((megapixels, GB), ...)}.
+    # A compiled LoRA run with no swap trains without checkpointing (13-27% faster) when this fits with a margin;
+    # a precision missing here (nf4: its dequantised weights stay alive for backward) always checkpoints
+    train_memory_nogc: dict = field(default_factory=dict)
+    # partial checkpointing on a big card where full off doesn't fit: {precision: (blocks, ((megapixels, GB with every
+    # block checkpointed, GB per block without it), ...))}, compiled with the checkpoint outside the graph, previews on
+    train_memory_partial: dict = field(default_factory=dict)
     optimizers: tuple = ("adamw8bit", "adamw")
+    # optimizer settings a family's own trainer applied (only when Optimizer Args doesn't set them): an Adam-family
+    # weight decay, and the 8-bit Adam eps floor of 1e-6 (training/optimizers.create_optimizer eps_floor_8bit - H3's
+    # fix for 8-bit second moments underflowing on its most structured tensors)
+    optimizer_weight_decay: Optional[float] = None
+    optimizer_eps_floor_8bit: bool = False
+    # the trainable adapter's weights: "fp32" (the layer's) or "bf16" (MiniMax H3's old trainer)
+    trainable_dtype: str = "fp32"
     # Automagic v3 keeps one learning rate per parameter group: (group name, (substrings of the dotted module
     # name, ...)) splits the LoRA so each family of modules finds its own rate; the first match wins, the rest form
     # "other". () = one group
@@ -157,11 +525,53 @@ class FamilyDescription:
     # Automagic v3's sign window for this family when Optimizer Args doesn't set polarity_history (0 = its default)
     automagic_sign_window: int = 0
     network_types: tuple = ("lora",)
+    # Adaptive LR also treats a grad-clip ratio over 50% of an epoch's steps as a stability signal (Klein's rule,
+    # training/adaptive_lr.AdaptiveLR clip_signal)
+    adaptive_lr_clip_signal: bool = False
+    adaptive_lr: bool = True          # the Adaptive LR control (off: hidden, never sent - MiniMax H3)
+    loss_watch: bool = True           # the per-image loss watch toggles (off: hidden, never sent - MiniMax H3)
+    # masked training (fizgig/dataset/masks.py): the driver's training_loss takes loss_mask; opt in, so a family added
+    # later never gets a tick its driver can't honour
+    masked_training: bool = False
+    # caption dropout (families/train.py): a share of steps trains on the empty caption's encoding, made once at the
+    # start with the family's own text encoder; off for a family with its own (H3) or no pictures (ACE-Step)
+    caption_dropout: bool = True
+    # the learning rates the Start checks call usual (launch.start_checks): ((kind, low, high), ...) for "lora",
+    # "finetune" and "slider" - a third of the lowest shipped preset to three times the highest; a rate outside is a
+    # warning at Start, never a block. A kind left out has no rule (an optimizer that sets its own rate has none)
+    start_lr_bands: tuple = ()
+    # Start at a smaller size (families/train.py): the first share of a standard LoRA's epochs at a smaller Target
+    # Megapixels, blended into the full size; its own cache folder (a latent file is named by the picture's size,
+    # not the training size). Off for clips (H3) and a family with no pictures (ACE-Step)
+    resolution_stages: bool = True
+    # Detail crops (dataset/detail_crops.py): a training folder switched to them in Image Prep also trains one square
+    # crop of each picture at its own scale (brushwork 1:1), at the size the run trains at; off for clips (H3) and a
+    # family with no pictures (ACE-Step)
+    detail_crops: bool = True
+    network_hint: str = ""            # the line under Network Type in place of the LoRA / LoKR trade
+    ema_hint: str = ""                # the line under Weight averaging (EMA) in place of the shared one
+    ema_section: str = ""             # "other": the EMA row sits in Other Options (MiniMax H3's place)
+    precision_label: str = ""         # the Base precision row's label ("Base Precision")
+    precision_after_states: bool = False   # the Base precision row below Save State / Keep Last (H3's place)
+    # the Samples tab's "Turbo preview: N steps at M% strength" row (MiniMax H3) instead of the Turbo strength box:
+    # the Steps box is the plain-model count, the row the turbo's
+    samples_turbo_pace: bool = False
     edit_training: bool = False       # Edit LoRA from before/after pairs (the driver's supports_references)
     edit_note: str = ""               # the Edit LoRA section's "What you need" line: pair count and photo size
+    # the most before-images an edited photo may have (photo.png, then photo_1.png, photo_2.png ... in the Originals
+    # folder): the first is the original at the same crop, the others are extra references at their own shape. 1 =
+    # one original only
+    edit_references: int = 1
     slider_training: bool = False     # Slider LoRAs (strength is a dial between two looks); the driver needs
     #                                   training_loss(diff_ref=, diff_weight=) and noise_latents / predict
     slider_guidance: float = 2.0      # a prompt slider's default push strength (the Training tab box when empty)
+    slider_sources: tuple = ("pairs", "prompts")   # where a slider's two ends come from (one = no chooser shown)
+    # the Kind of training row in the family's own words: ((kind, radio label, hint), ...) for "standard" / "edit" /
+    # "slider" / "finetune"; "" keeps the shared text (which speaks of photos and looks). () = all shared
+    kind_notes: tuple = ()
+    # the Slider card's prompt rows in the family's own words: ((key, heading, help), ...) for FAMILY_SLIDER_BASE /
+    # _POS / _NEG; () = the shared picture wording
+    slider_prompt_notes: tuple = ()
     slider_ultra_blocks: tuple = ()   # block ids (driver.block_map) an "Ultra mode" slider trains, () = no Ultra mode:
     #                                   the composition blocks only, so the slider holds up at far higher strengths
 
@@ -169,22 +579,40 @@ class FamilyDescription:
     sampling: tuple = ()              # SamplingSettings without any speed LoRA (first = default)
     speed_loras: tuple = ()           # SpeedLoRA entries
     preview_steps: int = 20
+    preview_every: int = 1           # Samples: a preview every N epochs (kept per family once edited)
+    # Samples: the LoRA strengths each training preview is also rendered at, beside 1.0 (a tick on the Samples tab,
+    # on by default; a standard LoRA only). () = none - the tick is not shown
+    preview_strengths: tuple = ()
     preview_cfg_note: str = ""         # the Samples tab's line under CFG Scale ("" = a plain default line)
-    workbench_follows_samples: bool = False   # Repair Studio / Explorer / Royale previews take the Samples tab's steps,
+    # the Samples tab's default negative prompt for the family (each family keeps the user's own edit); None = its
+    # previews take no negative, so the box greys out
+    preview_negative: Optional[str] = None
+    # Repair Studio / Royale renders take comfy-kitchen's INT8 attention (fizgig/modules/int8_attention.py:
+    # the family's attention calls attend() first). Inference only; the Profiler keeps exact attention
+    int8_attention: bool = False
+    # Repair Studio's Turbo Preview tick (families/act_cache.py): a slider change replays the unchanged blocks on
+    # step 1 - the same picture as a full render
+    activation_cache: bool = False
+    # the text cache's padding is dropped before every step (only the tokens its <name>__attention_mask marks are
+    # used, in order), so a training share can send it trimmed to those and pad it back on the helper (Krea 2: 512
+    # tokens kept, ~80 used - 31.5 MB a caption trimmed to ~5 MB)
+    text_cache_trim: bool = False
+    workbench_follows_samples: bool = False   # Repair Studio / Royale previews take the Samples tab's steps,
     #                                   CFG, negative prompt and turbo strength (else the family's fixed preview recipe)
+    # with workbench_follows_samples: the workbench renders on the preview checkpoint only while the Samples tab's tick
+    # for it is on, as training previews do - for a checkpoint that's another model to see the LoRA on (MOSS-Image's
+    # SFT). Off: a set checkpoint is always used (a speed checkpoint: Qwen's Turbo DiT, Flux 3's distilled)
+    workbench_checkpoint_follows_tick: bool = False
     preview_cfg: float = 1.0
     preview_width: int = 1024
     preview_height: int = 1024
+    repair_size: int = 768            # Repair Studio's starting preview size (its Res dropdown) for the family
+    block_activity: bool = False      # Repair Studio lights each block's slider as the song plays (BlockMeter)
+    repair_default_strength: float = 1.0   # Repair Studio's primary / donor "at strength" on a family switch (ACE-Step 0.5)
     preview_speed_lora: str = ""      # name of the SpeedLoRA previews use when its file is set in Preferences
     preview_speed_steps: int = 0      # preview steps with it (0 = the SpeedLoRA's own)
     preview_speed_strength: Optional[float] = None   # preview strength for it (None = the SpeedLoRA's own; 0 = off
     # by default: previews render without it until the Samples tab's Turbo strength is raised)
-    # (steps, strength) preview defaults an older release shipped; the Samples tab replaces them with the current
-    # ones, so a setting saved under the old default moves on instead of sticking
-    retired_preview_defaults: tuple = ()
-    # a one-time reset: when this tag is new to a user, the Samples tab replaces their saved preview steps and turbo
-    # strength with the current defaults once (the tag is remembered, so later choices stick). Change it to reset again.
-    preview_reset: str = ""
 
     # built-in Training-tab presets: ((name, {GUI setting key: value}), ...); the first is applied on a first visit
     presets: tuple = ()
@@ -193,13 +621,48 @@ class FamilyDescription:
     # downloader fetches them with the helper models so first use works offline
     helper_files: tuple = ()
 
-    # workbench tools that support this family ("repair", ...); the generic WorkbenchEngine drives them all
+    # workbench tools that support this family ("repair", "profiler", "extract", "royale", and "refmod":
+    # RefMod Toolkit, the engine's render_refmod / reference_items); the generic WorkbenchEngine drives them all
     workbench: tuple = ()
+    # the workbench engine class ("module:Class") when the generic engines do not fit (a family with clips gets the
+    # generic video engine, families/video_workbench.py). H3 brings its own for keyframes, references and RefMod on
+    # top of the shared clip contract. Built as Class(description).
+    workbench_engine: str = ""
+    # a video family's clip render regimes in the workbench: ((name, steps, speed LoRA strength), ...) - H3's "dial"
+    # (the fast loop) and "confirm" (the render that matches training previews). () = one regime, the speed LoRA's
+    # own steps and strength (or the default sampling without one)
+    clip_regimes: tuple = ()
     # Repair Studio built-ins beyond Reset All: (name, ((block id, strength), ...)) - every other block at 1.0
     repair_presets: tuple = ()
+    # Repair Studio's "I'm feeling lucky" (a random slider mix): every block rolls evenly between the Min / Max boxes
+    # beside the button, except the bands held here while "Hold" is ticked: ((first, last, low, high), ...) over
+    # block positions in the block map, each held block rolled within [low, high] instead. The dice never untick a
+    # block. () = nothing held
+    lucky_zones: tuple = ()
+    # Repair Studio's Alternate / Toggle detail blocks buttons: the model's detail-end block ids (Toggle switches them
+    # together; Alternate ticks even / unticks odd across the main blocks). () = no such buttons
+    detail_blocks: tuple = ()
+    # what each block carries, measured with the Profiler: ((block id, category), ...), category one of
+    # "identity" / "look" / "style_ident_overlap" (Repair Studio's colours). Unlisted blocks stay uncoloured.
+    block_categories: tuple = ()
+    # Repair Studio's category controls over block_categories - the five master sliders, the donor category toggles
+    # and the Identity / Style+Composition / Details only presets (Klein's 5-bucket map: style_composition,
+    # style_ident_overlap, identity, ident_details_overlap, details). False = per-block sliders only
+    category_masters: bool = False
+    # Fast Identity Mode: the block ids a standard LoRA trains alone when it is on (the measured identity blocks).
+    # Everything before the first of them runs forward only, so it is faster. () = no Fast Identity Mode.
+    identity_blocks: tuple = ()
+    # Model Area to Train: ((name, (block ids...), (min_t, max_t) or None), ...) - () blocks = every block, a window
+    # (0-1, 0 = clean) fills the Timestep Range. The first entry is the default; the Training tab adds "Custom" (pick
+    # blocks) and shows the Timestep Range (0-1000) for a family that has areas. () = neither control
+    train_areas: tuple = ()
 
     # things a user or a later session must know, with sources
     notes: tuple = ()
+    options: tuple = ()               # FamilyOption controls (the family's own settings, as launch tokens)
+    # a saved preset / Last Train written by the family's old entry: {standard-layer key: old key} filled in when the
+    # preset lacks the new key (H3's MINIMAX_EMA -> FAMILY_EMA, its fine-tune card's keys, ...)
+    settings_aliases: dict = field(default_factory=dict)
 
     # ---- derived ------------------------------------------------------------------------------
     # generic entry points shared by every described family (the standard layer)
@@ -229,6 +692,35 @@ class FamilyDescription:
         drv.description = self
         return drv
 
+    def workbench_engine_class(self):
+        """The class make_workbench_engine builds - read for its capabilities (supports_keyframes, ...) before any
+        engine exists."""
+        import importlib
+        if self.workbench_engine:
+            mod, _, cls = self.workbench_engine.partition(":")
+            return getattr(importlib.import_module(mod), cls)
+        if "clip" in self.media:
+            from fizgig.families.video_workbench import VideoWorkbenchEngine
+            return VideoWorkbenchEngine
+        from fizgig.families.workbench import WorkbenchEngine
+        return WorkbenchEngine
+
+    def make_workbench_engine(self):
+        """The family's workbench engine: its own class (workbench_engine), else the generic video engine for a family
+        with clips, else the generic WorkbenchEngine."""
+        return self.workbench_engine_class()(self)
+
+    @property
+    def video_workbench(self) -> bool:
+        """The workbench tabs' clip features apply (a family whose media include clips)."""
+        return "clip" in self.media
+
+    @property
+    def audio_workbench(self) -> bool:
+        """A sound-only family (music): the workbench renders songs - its previews are heard, the pictures are their
+        waveforms, and the Res setting is the song length in seconds."""
+        return set(self.media) == {"voice"}
+
     def lora_prefix(self, block: int, module: str) -> str:
         """Key stem of one wrapped module, e.g. 'transformer.transformer_blocks.3.attn.to_q'."""
         return self.lora.key_template.split(".{ab}")[0].format(block=block, module=module)
@@ -245,12 +737,40 @@ class FamilyDescription:
         """Pref key of the model file with this role ("" if the family has none)."""
         return next((f.pref_key for f in self.model_files if f.role == role), "")
 
+    def model_path(self, role: str, lookup) -> str:
+        """The path for a role, given lookup(pref_key) -> the user's setting: the role's own file, or - for a part
+        that ships inside another file (ModelFile.inside) and is left empty - that file's."""
+        f = next((m for m in self.model_files if m.role == role), None)
+        if f is None:
+            return ""
+        p = str(lookup(f.pref_key) or "").strip()
+        if not p and f.inside:
+            p = str(lookup(f.inside) or "").strip()
+        return p
+
     def block_ids(self) -> list:
         return [f"{self.block_prefix}_{i}" for i in range(self.n_blocks)]
+
+    def preview_look(self):
+        """The Preferences row (ModelFile, role "look_lora") of the LoRA the Samples tab's preview_look_tick puts on
+        previews of the training model, or None."""
+        if not self.preview_look_tick:
+            return None
+        return next((m for m in self.model_files if m.role == "look_lora"), None)
 
     def preview_speed(self):
         """The SpeedLoRA used for in-training previews, or None."""
         return next((sl for sl in self.speed_loras if sl.name == self.preview_speed_lora), None)
+
+    def cfg_note(self) -> str:
+        """The Samples tab's line under CFG Scale: the family's own, plus the Turbo LoRA's CFG when previews with it
+        use another (Anima's Turbo: 1, against the plain model's 4.5) - the box follows the Turbo on and off."""
+        note = self.preview_cfg_note or "1 = no CFG. Above 1 the negative prompt applies."
+        sp = self.preview_speed()
+        if sp is not None and sp.pref_key and not self.samples_turbo_pace and sp.settings.cfg != self.preview_cfg:
+            note += (f" With the Turbo LoRA on (strength above 0), previews use CFG {sp.settings.cfg:g} and the box "
+                     "switches to it.")
+        return note
 
     def preview_speed_defaults(self):
         """(steps, strength) previews use with the preview SpeedLoRA, or None without one."""
@@ -274,11 +794,7 @@ class FamilyDescription:
             "train_script": self.train_script,
             "cache_latents_script": self.cache_script,
             "cache_text_script": self.cache_script,
-            "network_module": "fizgig.networks.lora_klein",   # unused: the family trainer builds its own net
             "use_fizgig_venv": True,
-            "timestep_sampling": "shift",
-            "discrete_flow_shift": None,
-            "weighting_scheme": "none",
             "blocks_swap_max": max(0, self.n_blocks - 2),
             "fp8_text_encoder_flag": None,
             "uses_clip": False,
@@ -290,14 +806,18 @@ class FamilyDescription:
             "vae_label": self.vae_label,
             "text_encoder_label": self.text_encoder_label,
             "is_distilled": False,
-            "supports_weighting_scheme": False,
-            "supports_discrete_flow_shift": False,
             "supports_samples": True,
+            # a CFG-free family (samples_cfg_free) greys Negative Prompt and CFG Scale, as the distilled flags do; a
+            # family with no preview_negative greys the negative
+            "sample_is_distilled": bool(self.samples_cfg_free or self.preview_negative is None),
+            "sample_negative_default": self.preview_negative,
+            "sample_cfg_fixed": bool(self.samples_cfg_free),
             "sample_cfg_default": self.preview_cfg,
             "sample_flow_shift_default": None,
             "sample_steps_default": self.preview_steps if self.preview_steps else (s.steps if s else 20),
             "sample_width_default": self.preview_width,
             "sample_height_default": self.preview_height,
+            "sample_every_default": self.preview_every,
             "lora_name_suffix": self.lora_name_suffix,
         }
 

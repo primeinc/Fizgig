@@ -12,7 +12,8 @@ bit-identical to extracting that rank alone.
 
 Architecture-agnostic: keys are flattened to the kohya convention
 (``blocks.0.attn.wq.weight`` -> ``lora_unet_blocks_0_attn_wq``), which is what the Klein,
-Krea 2 and MiniMax H3 LoRA loaders all expect.
+Krea 2 and MiniMax H3 LoRA loaders all expect. A checkpoint that names its model under a prefix
+(Anima's ``net.``, SDXL's ``model.diffusion_model.``) has it dropped first, so ComfyUI maps the keys.
 
 Pre-quantized checkpoints are decoded before the diff, not after — see `dense_weight`. That
 matters for MiniMax H3, where 200 of the 264 comparable matrices are stored as int8 ConvRot
@@ -104,13 +105,68 @@ def dense_weight(handle, key: str, keyset, device) -> torch.Tensor:
 def is_lora_target(key: str, shape) -> bool:
     if not key.endswith(".weight") or len(shape) != 2:
         return False
-    low = key.lower()
-    return not any(s in low for s in _SKIP_SUBSTRINGS)
+    # by path component: "embed" in a stack of transformer blocks (MOSS-Image's text_embedder.blocks.N.qkv) is not an
+    # embedding - its Linears are the text adapter's, and a fine-tune changes them like any other block
+    parts = key.lower().split(".")
+    for i, p in enumerate(parts):
+        for s in _SKIP_SUBSTRINGS:
+            if s in p and not (s == "embed" and i + 1 < len(parts) and parts[i + 1] in ("blocks", "layers")):
+                return False
+    return True
 
 
-def lora_key(model_key: str) -> str:
-    """blocks.0.attn.wq.weight -> lora_unet_blocks_0_attn_wq"""
+def lora_key(model_key: str, prefix: str = "") -> str:
+    """blocks.0.attn.wq.weight -> lora_unet_blocks_0_attn_wq; a checkpoint's own prefix (`prefix`) is dropped first"""
+    if prefix and model_key.startswith(prefix):
+        model_key = model_key[len(prefix):]
     return "lora_unet_" + model_key[: -len(".weight")].replace(".", "_")
+
+
+def model_prefixes() -> list:
+    """The prefixes a model file can name its diffusion model's weights under: each fine-tune family's own
+    (FTSpec.file_prefix - Anima's "net.", a single-file SDXL checkpoint's "model.diffusion_model.") and ComfyUI's
+    "diffusion_model.". Longest first."""
+    out = {"diffusion_model."}
+    try:
+        from fizgig.families.registry import training_families
+        for d in training_families():
+            if d.finetune:
+                try:
+                    p = d.load_driver().ft_spec(None).file_prefix
+                except Exception:
+                    p = ""
+                if p:
+                    out.add(p)
+    except Exception:
+        pass
+    return sorted(out, key=len, reverse=True)
+
+
+def prefix_family(prefix):
+    """The fine-tune family whose checkpoints name their model weights under `prefix` (its FTSpec.file_prefix), or
+    None - ComfyUI's generic "diffusion_model." belongs to no one family."""
+    if not prefix or prefix == "diffusion_model.":
+        return None
+    try:
+        from fizgig.families.registry import training_families
+        for d in training_families():
+            if d.finetune:
+                try:
+                    if d.load_driver().ft_spec(None).file_prefix == prefix:
+                        return d
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return None
+
+
+def model_prefix(keys) -> str:
+    """The prefix most of a checkpoint's keys share from model_prefixes(), or "" (Klein, Krea 2, Qwen, H3 files)."""
+    keys = list(keys)
+    counts = {p: sum(k.startswith(p) for k in keys) for p in model_prefixes()}
+    best = max(counts, key=counts.get) if counts else ""
+    return best if counts.get(best, 0) else ""
 
 
 def factor_multi(delta: torch.Tensor, ranks: Iterable[int]) -> dict:
@@ -171,11 +227,21 @@ def extract_diff_loras(
     if only_tuned:
         say(f"note: {only_tuned} key(s) exist only in the trained file and are ignored")
 
+    prefix = model_prefix(base_keys)
+    if prefix:
+        # a checkpoint carrying more than the diffusion model (SDXL's text encoders and VAE): only the model's keys
+        say(f"model weights under '{prefix}' - the rest of the file is not compared")
     keys = [k for k in sorted(base_keys & tune_keys)
-            if is_lora_target(k, h_base.get_slice(k).get_shape())]
+            if k.startswith(prefix) and is_lora_target(k, h_base.get_slice(k).get_shape())]
     if not keys:
         raise RuntimeError("no comparable 2-D weights found — are these the same architecture?")
     say(f"{len(keys)} candidate matrices, ranks {ranks}, device {dev}")
+    # a family with its own (non-kohya) LoRA names gets them, as its own trainer writes them - ACE-Step's PEFT
+    # base_model.model.<path>.lora_A, which ComfyUI maps (it ignores lora_unet_ names there)
+    fam = prefix_family(prefix)
+    fmt = fam.lora if fam is not None and fam.lora is not None and not fam.lora.kohya else None
+    if fmt is not None:
+        say(f"{fam.display_name}: writing its own LoRA names ({fmt.file_prefix}<path>.{fmt.down})")
 
     sd = {r: {} for r in ranks}
     changed = skipped = 0
@@ -196,12 +262,17 @@ def extract_diff_loras(
                 progress(i + 1, len(keys), k)
             continue
         total_norm += nrm
-        lk = lora_key(k)
+        if fmt is not None:
+            lk = fmt.file_prefix + k[len(prefix):-len(".weight")]
+            dn, upn, ak = f"{lk}.{fmt.down}.weight", f"{lk}.{fmt.up}.weight", fmt.alpha_key.format(prefix=lk)
+        else:
+            lk = lora_key(k, prefix)
+            dn, upn, ak = f"{lk}.lora_down.weight", f"{lk}.lora_up.weight", f"{lk}.alpha"
         for r, (up, down) in factor_multi(d, ranks).items():
-            sd[r][f"{lk}.lora_up.weight"] = up
-            sd[r][f"{lk}.lora_down.weight"] = down
+            sd[r][upn] = up
+            sd[r][dn] = down
             # alpha == rank -> scale 1.0, so up @ down reproduces the delta as-is.
-            sd[r][f"{lk}.alpha"] = torch.tensor(float(min(r, min(d.shape))))
+            sd[r][ak] = torch.tensor(float(min(r, min(d.shape))))
         changed += 1
         del d
         if progress:
@@ -226,6 +297,8 @@ def extract_diff_loras(
             "fizgig_source_tuned": os.path.basename(tuned_path),
             "fizgig_source_layers": str(changed),
         }
+        if fam is not None and getattr(fam, "modelspec_arch", ""):
+            meta["modelspec.architecture"] = fam.modelspec_arch
         save_file(sd[r], path, metadata=meta)
         written.append(path)
         say(f"saved r{r}: {os.path.basename(path)} "

@@ -1,7 +1,7 @@
 # Full fine-tuning — "How do I…?"
 
-The extended companion to the README's fine-tuning section, for **Krea 2**, **Qwen Image 2.1**
-and **MiniMax H3**. Everything here is measured or field-tested, not aspirational. If you're
+The extended companion to the README's fine-tuning section, for **Flux 3 Image Klein**, **Krea 2**,
+**Qwen Image 2.1** and **MiniMax H3**. Everything here is measured or field-tested, not aspirational. If you're
 new to fine-tuning and coming from LoRA training, read the first four answers in order —
 they're the ones that save you a wasted overnight run.
 
@@ -16,7 +16,7 @@ they're the ones that save you a wasted overnight run.
 
 ## How do I start a fine-tune?
 
-On Krea 2 or Qwen Image 2.1, pick **Fine-tune the whole model** under **Kind of training** on
+On Flux 3 Image Klein, Krea 2 or Qwen Image 2.1, pick **Fine-tune the whole model** under **Kind of training** on
 the Training tab; on MiniMax H3, tick **⚗ Fine-tune the BASE MODEL instead of training a
 LoRA**. Then press Start. That's genuinely it — the planner
 measures the memory actually free on your card at launch, picks the plan that fits, and
@@ -94,11 +94,11 @@ space — see the regularisation answer below.
 
 At the default training resolution:
 
-| Your card | Krea 2 — photos | H3 — photos | H3 — voice | H3 — video, confirmed | H3 — video on likeness blocks, expected |
-|---|---|---|---|---|---|
-| **16 GB** | ✅ | ✅ | ✅ | ✅ up to **2.3 s** | up to **3.8 s** |
-| **24 GB** | ✅ | ✅ | ✅ | ✅ up to **2.3 s** | up to **5.2 s** |
-| **32 GB** | ✅ | ✅ | ✅ | ✅ up to **3.8 s** | up to **5.2 s** |
+| Your card | Flux 3 Image Klein — photos | Krea 2 — photos | H3 — photos | H3 — voice | H3 — video, confirmed | H3 — video on likeness blocks, expected |
+|---|---|---|---|---|---|---|
+| **16 GB** | ✅ | ✅ | ✅ | ✅ | ✅ up to **2.3 s** | up to **3.8 s** |
+| **24 GB** | ✅ | ✅ | ✅ | ✅ | ✅ up to **2.3 s** | up to **5.2 s** |
+| **32 GB** | ✅ | ✅ | ✅ | ✅ | ✅ up to **3.8 s** | up to **5.2 s** |
 
 12 GB cards train **LoRAs**, not fine-tunes — 16 GB is the tested fine-tune floor. Every
 confirmed cell comes from a measured run; the expected column is conservative arithmetic
@@ -188,9 +188,9 @@ No, unless you are testing it. The refiner is the model's bridge from the text e
 
 You can. The training adapter (a de-distillation LoRA, Circlestone by default for every H3 LoRA run) is available under Fine-tune with the same contract: it rides frozen at 1.0 for every training step so the gradient is about your subject rather than about undoing H3's distillation, it switches off for previews, and it is never written into the checkpoint — the file you get is a plain H3 fine-tune. It is on by default under Fine-tune as it is for LoRA runs; the LoRA-mode numbers (faster likeness, higher peak, no frying with other Turbo LoRAs, measured with Ostris's adapter; Circlestone's trained sharper LoRAs again in later A/Bs on stills) are the reason, and an A/B on your own dataset — same seed, adapter on versus off — is how to check it for yourself. The file is the same one your LoRA runs use: the **Training adapter** dropdown picks Circlestone (one file for both bases — best for photos), Ostris (fl2va or ref2va file to match the base — best for videos) or Off; for a mixed dataset, choose by whether the photos or the videos are the priority.
 
-## Do the problem-image tools work on a fine-tune? (Krea 2)
+## Do the per-image tools work on a fine-tune? (Krea 2)
 
-Mostly, yes. **Detect problem images**, **per-image adaptive LR** and **look-outlier
+Mostly, yes. **Track how each image trains**, **per-image adaptive LR** and **look-outlier
 warmup** all work under a fine-tune — their throttles ride the same per-step loss scaling
 the regularisation multiplier uses, and detection judges each image against the rest of
 the dataset at the same epoch, so the rotation's epoch-to-epoch shifts cancel out.
@@ -198,7 +198,7 @@ the dataset at the same epoch, so the rotation's epoch-to-epoch shifts cancel ou
 Two exceptions, both deliberate: **(global) Adaptive LR** switches off when you pick
 Fine-tune — rotation boundaries look like instability to its plateau watcher — and
 **auto-recaption** is off under a fine-tune (its between-epoch caption re-encode isn't
-fine-tune-safe yet). Caption edits queued from the Problem Images window during a
+fine-tune-safe yet). Caption edits queued from the per-image loss view (Runs & outputs) during a
 fine-tune are held and apply in your next LoRA-mode run on that dataset.
 
 ## What are regularisation images, and what does LR × do?
@@ -262,10 +262,7 @@ exactly which ingredient is missing.
 
 ## How do I share a fine-tune? It's 26 GB!
 
-Run **Checkpoint to LoRA** — the **Checkpoint to LoRA…** button on the fine-tune card, or your
-**Fizgig folder's `run_diff_to_lora.bat`**
-(double-click it; it opens its own small window, separate from the main app — on Linux
-or a RunPod pod use `./run_diff_to_lora.sh`). It diffs
+On the **Extract** tab, choose **From a fine-tune**. It diffs
 your fine-tune against the
 base model and extracts the difference as an ordinary kohya `.safetensors` at several
 ranks at once. Measured: **rank 64 was perceptually indistinguishable from the full
@@ -299,6 +296,8 @@ The same training bases you already have — nothing new to download:
 - **Krea 2** fine-tunes the **RAW bf16 model** (`krea2_raw_bf16.safetensors`, ~26 GB).
   The fp8 Turbo is the workbench preview model and can't be fine-tuned.
 - **Qwen Image 2.1** fine-tunes its **bf16 DiT** (`qwen_image_2.1_bf16.safetensors`).
+- **Flux 3 Image Klein** fine-tunes its **bf16 Base** (`flux3_image_klein_bf16.safetensors`), not the
+  distilled model.
 - **MiniMax H3** fine-tunes the **pruned int8 checkpoint**
   (`minimax_h3_fl2va_pruned_int8_convrot.safetensors`, ~21 GB) — the same file ComfyUI
   runs. The ~66 GB bf16 file works for LoRA training only; the trainer refuses it for
