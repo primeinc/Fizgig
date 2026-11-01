@@ -5,8 +5,8 @@ from types import SimpleNamespace
 from fizgig.web.model_inventory import GIB, inventory
 
 
-def file(key, size_gb=1.0, required=True):
-    return SimpleNamespace(pref_key=key, size_gb=size_gb, required=required)
+def file(key, size_gb=1.0, required=True, same_as=""):
+    return SimpleNamespace(pref_key=key, size_gb=size_gb, required=required, same_as=same_as)
 
 
 def family(*models):
@@ -77,3 +77,36 @@ def test_paths_from_family_options_are_included_even_without_model_file_metadata
     assert data["files"]["option_model"]["exists"]
     assert data["files"]["option_model"]["bytes"] == len(b"known existing file")
     assert data["summary"]["disk_bytes"] == len(b"known existing file")
+
+
+def test_directory_models_count_ready_without_expensive_recursive_walk(tmp_path):
+    directory = tmp_path / "krea2" / "text_encoder"
+    directory.mkdir(parents=True)
+    (directory / "model.safetensors").write_bytes(b"a model shard")
+    result = inventory({"encoder": str(directory)}, [family(file("encoder", 8.88))], str(tmp_path))
+    assert result["files"]["encoder"]["exists"]
+    assert result["files"]["encoder"]["directory"]
+    assert result["summary"]["found"] == 1
+    assert result["summary"]["folder_count"] == 1
+    assert result["summary"]["disk_bytes"] == 0  # directory content not falsely reported as 0 GB total
+    assert result["summary"]["remaining_required_bytes"] == 0
+
+
+def test_shared_missing_model_counts_only_one_download(tmp_path):
+    # Z-Image Turbo/Base reuse the exact same VAE and Qwen3 text encoder.
+    f1 = family(file("zimage_vae", 0.34), file("zimage_text_encoder", 8.04))
+    f2 = family(file("zimage_base_vae", 0.34, same_as="zimage_vae"),
+                file("zimage_base_text_encoder", 8.04, same_as="zimage_text_encoder"))
+    data = inventory({}, [f1, f2], str(tmp_path))
+    assert data["summary"]["count"] == 4
+    assert data["summary"]["remaining_required_bytes"] == round(0.34 * GIB) + round(8.04 * GIB)
+
+
+def test_shared_model_available_under_other_family_needs_no_download(tmp_path):
+    path = tmp_path / "zimage_vae.safetensors"
+    path.write_bytes(b"shared model")
+    a = file("vae", 0.34)
+    b = file("base_vae", 0.34, same_as="vae")
+    data = inventory({"vae": str(path)}, [family(a), family(b)], str(tmp_path))
+    assert data["summary"]["remaining_required_bytes"] == 0
+    assert data["summary"]["disk_bytes"] == path.stat().st_size

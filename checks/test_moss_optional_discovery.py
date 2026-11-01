@@ -48,3 +48,20 @@ def test_manual_alternative_stays_a_link_not_an_implicit_download_choice():
     candidates = {w.pref_key: w for w in fetch_models.discovery_candidates(
         ("moss_image",), choices={"moss_image_text_encoder": "alt"})}
     assert candidates["moss_image_text_encoder"].filename == "qwen3.5_9b_bf16.safetensors"
+
+
+def test_search_locally_finds_manual_int8_alternative_when_bf16_is_absent(tmp_path, monkeypatch):
+    w = next(weight for weight in fetch_models.discovery_candidates(("moss_image",))
+             if weight.pref_key == "moss_image_text_encoder")
+    assert w.alt is not None
+    assert w.alt.filename == "qwen3.5_9b_int8_convrot.safetensors"
+    root = tmp_path / "ComfyUI" / "models" / "text_encoders"
+    root.mkdir(parents=True)
+    alternative = root / w.alt.filename
+    alternative.write_bytes(b"existing alternate model")
+    monkeypatch.setattr(fetch_models, "_valid_safetensors", lambda path, _: True)
+    monkeypatch.setattr(model_sources, "automatic_roots", lambda: ())
+    monkeypatch.setattr(model_sources, "try_to_load_from_cache", lambda *_: None)
+    prefs = {"model_search_roots": [str(root.parent)]}
+    assert fetch_models.find_weight(w, str(tmp_path / "own"), prefs) is None
+    assert fetch_models.find_weight(w, str(tmp_path / "own"), prefs, allow_alternates=True) == str(alternative)

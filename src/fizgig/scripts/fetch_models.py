@@ -156,10 +156,11 @@ def _weight_from_file(f):
                optional=f.fetch_is_optional, gated=f.gated, local_name=f.local_name or None,
                replaces=f.replaces)
     w.same_as = f.same_as
-    if f.fetch_choice and f.alt_repo and f.alt_path:
+    if f.alt_repo and f.alt_path:
         w.alt = Weight(f.pref_key, f.alt_repo, f.alt_path, f.alt_size_gb or f.size_gb,
-                       f"{f.label} — {f.fetch_choice[1]}", optional=w.optional, gated=f.gated,
-                       replaces=f.replaces)
+                       f"{f.label} — {f.alt_label or (f.fetch_choice[1] if f.fetch_choice else 'alternate')}",
+                       optional=w.optional, gated=f.gated, replaces=f.replaces)
+    w.fetch_choice_enabled = bool(f.fetch_choice)
     return w
 
 
@@ -381,7 +382,7 @@ def _configured_file(value, repo_dir=None):
     return os.path.abspath(path) if os.path.isfile(path) else ""
 
 
-def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None):
+def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alternates=False):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
     A user-picked alternate build and replacement for a retired filename are exceptions:
@@ -399,6 +400,15 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None):
                                          _valid_safetensors, min_bytes, cache=scan_cache)
     if found is model_sources.AMBIGUOUS or found:
         return found
+    # Search Locally can reuse an advertised alternative build even if the
+    # model does not offer a downloader build-choice dropdown. Bulk downloads
+    # deliberately do not switch builds unless explicitly selected.
+    if allow_alternates and getattr(w, "alt", None):
+        alt = w.alt
+        alt_found = model_sources.resolve_weight(alt, prefs.get("model_search_roots", []), models_dir,
+                          _valid_safetensors, int(alt.gb * 0.8 * 1024 ** 3), cache=scan_cache)
+        if alt_found is model_sources.AMBIGUOUS or alt_found:
+            return alt_found
     # The chosen output library is also a source, but user roots and the HF cache
     # retain precedence. A missing external destination must not break local discovery.
     try:
@@ -580,7 +590,7 @@ def _chosen(w, choices):
     """The build to fetch for a file with a choice: {pref_key: "main" | "alt"} picks one and lets it replace the other
     (so a pref on the other moves); without a pick, the main file as before, the user's own file kept."""
     pick = (choices or {}).get(getattr(w, "pref_key", ""))
-    if getattr(w, "alt", None) is None or pick not in ("main", "alt"):     # the strangers pack has no build to pick
+    if getattr(w, "alt", None) is None or not getattr(w, "fetch_choice_enabled", True) or pick not in ("main", "alt"):     # the strangers pack has no build to pick
         return w
     use, other = (w.alt, w) if pick == "alt" else (w, w.alt)
     import copy

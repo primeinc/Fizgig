@@ -986,7 +986,8 @@ function mpRefresh() {
 function mpRow(family, key, m) {
   const st = mpStat(key), path = String(S.prefs[key] || "");
   const state = st.exists ? "ready" : path.trim() ? "stale" : "missing";
-  const statusLabel = st.exists ? "On disk" : path.trim() ? "Path not found" : "Not configured";
+  const statusLabel = st.exists ? (st.directory ? "Model folder available" : "On disk") :
+    path.trim() ? "Path not found" : "Not configured";
   const label = m.label || key;
   const input = el("input", {type: "text", class: "w-path mp-path-input", value: path,
     "aria-label": label + " file path", spellcheck: "false", title: path || "Choose a model file"});
@@ -1028,8 +1029,8 @@ function mpRow(family, key, m) {
     m.alt_path ? m.alt_path.split("/").pop() : ""].filter(Boolean);
   (S.mpRows[key] ||= []).push({node: progress, filenames: fileNames});
   const status = el("span", {class: "mp-row-size " + state,
-    text: st.exists ? mpSize(st.bytes) + " on disk" :
-      state === "stale" ? "Path missing" : "Not on disk"});
+    text: st.exists ? (st.directory ? "Model folder ready · size not measured" :
+      mpSize(st.bytes) + " on disk") : state === "stale" ? "Path missing" : "Not on disk"});
   const controls = el("div", {class: "mp-row-controls"},
     el("button", {class: "btn btn-sm", text: "Choose…",
       title: "Pick a model file on the Fizgig computer", onclick: () =>
@@ -1086,7 +1087,8 @@ function mpToolbar(families) {
   const bar = el("div", {class: "mp-summary"},
     mpChip((summary.found || 0) + " on disk", "ready"),
     mpChip((summary.optional || 0) + " optional", "optional"),
-    mpChip(mpSize(summary.disk_bytes || 0) + " on disk"),
+    mpChip(mpSize(summary.disk_bytes || 0) + " in model files"),
+    ...((summary.folder_count || 0) ? [mpChip(summary.folder_count + " folders · unmeasured")] : []),
     mpChip(mpSize(summary.remaining_required_bytes || 0, true) + " required downloads left", "missing"));
   const searchStatus = el("span", {class: "mp-search-status", role: "status"});
   S.mpSearchStatus = searchStatus;
