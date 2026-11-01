@@ -80,7 +80,8 @@ def test_web_scan_does_not_overwrite_user_edit_during_search(web_search, monkeyp
     root, prefs_file, w = web_search
     manual = root / "manual.safetensors"
     result = tiny_file(root / w.filename)
-    def race(_w, _models_dir, _prefs, scan_cache=None):
+    def race(_w, _models_dir, _prefs, scan_cache=None, allow_alternates=False):
+        assert allow_alternates
         server.update_prefs({w.pref_key: str(manual)})
         return str(result)
     monkeypatch.setattr(fetch_models, "find_weight", race)

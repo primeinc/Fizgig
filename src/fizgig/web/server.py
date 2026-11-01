@@ -2516,7 +2516,7 @@ def _start_model_search(family="", choices=None):
         raise ValueError("Unknown model family.")
     allowed = {f.pref_key for d in training_families() for f in d.model_files if f.fetch_choice}
     choices = {str(k): v for k, v in (choices or {}).items() if k in allowed and v in ("main", "alt")}
-    weights = list(fetch_models.model_candidates((family,) if family else None, choices=choices))
+    weights = list(fetch_models.discovery_candidates((family,) if family else None, choices=choices))
     with _lock:
         if _model_search["state"] == "running":
             raise ValueError("A local model search is already running.")
@@ -2531,7 +2531,8 @@ def _start_model_search(family="", choices=None):
         scan_cache = {}  # walk each configured model library at most once per search
         try:
             for w in weights:
-                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs, scan_cache=scan_cache)
+                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs, scan_cache=scan_cache,
+                                                  allow_alternates=True)
                 current = str(prefs.get(w.pref_key) or "").strip()
                 if result is fetch_models.model_sources.AMBIGUOUS:
                     status, path = "ambiguous", ""
@@ -3002,10 +3003,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"user": "admin", "login": fm["login"],
                               "password": pw.ljust(12, "0") if fm["login"] == "padded" else pw})
         if path == "/api/prefs":
-            from fizgig.web import pod_stop
+            from fizgig.web import model_inventory, pod_stop
             p = load_prefs()
-            return self.json({"models": {k: str(p.get(k) or "") for d in training_families()
+            families = list(training_families())
+            model_stats = model_inventory.inventory(p, families, BASE_DIR, key_resolver=form.model_keys)
+            return self.json({"models": {k: str(p.get(k) or "") for d in families
                                          for k in form.model_keys(d)},
+                              "model_inventory": model_stats,
                               "model_search_roots": p.get("model_search_roots")
                               if isinstance(p.get("model_search_roots"), list) else [],
                               "model_download_layout": str(p.get("model_download_layout") or "fizgig"),
