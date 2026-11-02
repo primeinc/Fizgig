@@ -93,8 +93,13 @@ def _inspect_file(path):
             key = keys[0]
             part = opened.get_slice(key)
             example = {"name": key, "shape": list(part.get_shape()), "dtype": part.get_dtype()}
+            # get_slice returns tensor *metadata*, never actual weight data. The
+            # entire model layout is needed to detect wrong architectures even
+            # when a fine-tune changes the SHA-256.
+            layout = {name: tuple(opened.get_slice(name).get_shape()) for name in keys}
             kind = _fingerprint(keys)
-        return {"state": "inspected", "kind": kind, "tensors": len(keys), "example": example}
+        return {"state": "inspected", "kind": kind, "tensors": len(keys),
+                "example": example, "_layout": layout}
     except Exception as exc:
         return {"state": "invalid", "message": "Cannot read safetensors header: " + str(exc)[:250]}
 
@@ -178,8 +183,47 @@ def _hub_reference(repo, path):
     if info is None:
         raise ValueError("The catalog path is absent from the official repository")
     lfs = getattr(info, "lfs", None)
-    return {"sha256": getattr(lfs, "sha256", "") if lfs else "",
-            "size": getattr(info, "size", None), "revision": model.sha}
+    result = {"sha256": getattr(lfs, "sha256", "") if lfs else "",
+              "size": getattr(info, "size", None), "revision": model.sha}
+    # The Hub API fetches only the safetensors header, not the weights.
+    # This enables comparing an independently fine-tuned / renamed file
+    # against a known architecture. A missing header never defeats a valid
+    # official checksum.
+    try:
+        meta = api.parse_safetensors_file_metadata(repo, path, revision=model.sha)
+        result["tensors"] = {name: list(t.shape) for name, t in meta.tensors.items()}
+    except Exception:
+        pass
+    return result
+
+
+def _compare_layout(actual, expected):
+    """Compare tensor keys/shapes; dtype alone is not a model identity.
+
+    No match is *not* proof of an invalid model: a loader may translate
+    quantized/packed tensor names. Return evidence, never silently promote it.
+    """
+    if not isinstance(expected, dict) or len(expected) < 12 or len(actual) < 12:
+        return None
+    common = set(actual).intersection(expected)
+    equal = sum(tuple(actual[key]) == tuple(expected[key]) for key in common)
+    different = len(common) - equal
+    coverage = round(len(common) / max(1, len(actual)), 4)
+    reference_coverage = round(len(common) / max(1, len(expected)), 4)
+    shape_ratio = round(equal / max(1, len(common)), 4)
+    summary = {"matched": equal, "wrong_shapes": different, "common": len(common),
+               "file_tensors": len(actual), "reference_tensors": len(expected),
+               "file_coverage": coverage, "reference_coverage": reference_coverage,
+               "shape_agreement": shape_ratio}
+    if (len(common) >= 12 and coverage >= .90 and reference_coverage >= .90
+            and shape_ratio >= .99):
+        return "match", summary
+    if len(actual) >= 30 and len(expected) >= 30 and (
+        (coverage <= .10 and reference_coverage <= .10)
+        or (len(common) >= 12 and different >= 5 and shape_ratio < .70)
+    ):
+        return "mismatch", summary
+    return "uncertain", summary
 
 
 def _hash(path, size, progress, cancel):
@@ -219,6 +263,7 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
         return {"state": "invalid", "message": "Not a regular model file.", "path": path}
     before = _identity(path)
     structural = _inspect_file(path)
+    layout = structural.pop("_layout", {})
     if structural["state"] != "inspected":
         return {**structural, "path": path}
     role = getattr(model, "role", "") if model is not None else ""
@@ -234,6 +279,7 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
     resolve = lookup or _hub_reference
     errors = []
     candidates = []
+    shapes = []
     if progress:
         progress("reference", 0, before[2])
     for item in refs:
@@ -247,35 +293,59 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
             errors.append(item["label"] + ": " + str(exc)[:110])
         if isinstance(source.get("sha256"), str) and len(source["sha256"]) == 64:
             candidates.append(source)
-    if not candidates:
-        return {"state": "unverified", "path": path, **{k: v for k, v in structural.items() if k != "state"},
-                "message": "Safetensors header parses, but no trusted SHA-256 was available; identity NOT verified.",
-                "reference_errors": errors[:3]}
+        check = _compare_layout(layout, source.get("tensors"))
+        if check is not None:
+            level, details = check
+            shapes.append((level, {**details, "source": source["label"],
+                                   "repo": source["repo"], "file": source["path"],
+                                   "revision": source.get("revision")}))
+    matched_layout = next((details for level, details in shapes if level == "match"), None)
+    rejected_layouts = [details for level, details in shapes if level == "mismatch"]
+    uncertain_layouts = [details for level, details in shapes if level == "uncertain"]
     plausible = [c for c in candidates if not isinstance(c.get("size"), int) or c["size"] == before[2]]
+    digest = None
+    if plausible:
+        if progress:
+            progress("hashing", 0, before[2])
+        try:
+            digest = _hash(path, before[2], progress, cancel)
+        except Cancelled:
+            return {"state": "cancelled", "path": path, "message": "Test cancelled."}
+        except (OSError, ValueError) as exc:
+            return {"state": "invalid", "path": path, "message": str(exc)}
+        if _identity(path) != before:
+            return {"state": "invalid", "path": path,
+                    "message": "The file was modified while it was being tested."}
+        for candidate in plausible:
+            if digest.lower() == candidate["sha256"].lower():
+                return {"state": "pass", "path": path, **structural,
+                        "message": "Exact SHA-256 match. File identity VERIFIED; runtime GPU loading not tested.",
+                        "match": {k: candidate.get(k) for k in ("repo", "path", "label", "revision")},
+                        "sha256": digest, "bytes": before[2]}
+    # A custom fine-tune often has different bytes but exactly the same
+    # names/shapes as its base model. A custom quantized conversion may not.
+    if matched_layout:
+        return {"state": "layout_match", "path": path, **structural,
+                "message": "Tensor names and shapes match this model architecture. File identity, Base/SFT variant, and loader execution are NOT verified.",
+                "structure": matched_layout, "sha256": digest}
+    if rejected_layouts and not uncertain_layouts:
+        return {"state": "layout_mismatch", "path": path, **structural,
+                "message": "Tensor names/shapes conflict with the available catalog builds. Likely wrong architecture or unsupported conversion; no loader was run.",
+                "structures": rejected_layouts[:3], "sha256": digest}
+    if not candidates:
+        return {"state": "unverified", "path": path, **structural,
+                "message": "Safetensors header parses, but no trusted model identity or matching structural reference is available.",
+                "reference_errors": errors[:3],
+                "structures": uncertain_layouts[:3]}
     if not plausible:
-        return {"state": "different", "path": path, **{k: v for k, v in structural.items() if k != "state"},
-                "message": "Wrong file size for every catalog-approved build. This is not a verified model for this slot.",
+        return {"state": "different", "path": path, **structural,
+                "message": "Size differs from every approved byte-identical build. Custom or quantized models may still work; architecture unverified.",
                 "actual_bytes": before[2],
-                "expected": [{"label": c["label"], "bytes": c["size"]} for c in candidates]}
-    if progress:
-        progress("hashing", 0, before[2])
-    try:
-        digest = _hash(path, before[2], progress, cancel)
-    except Cancelled:
-        return {"state": "cancelled", "path": path, "message": "Test cancelled."}
-    except (OSError, ValueError) as exc:
-        return {"state": "invalid", "path": path, "message": str(exc)}
-    if _identity(path) != before:
-        return {"state": "invalid", "path": path, "message": "The file was modified while it was being tested."}
-    for candidate in plausible:
-        if digest.lower() == candidate["sha256"].lower():
-            return {"state": "pass", "path": path, **{k: v for k, v in structural.items() if k != "state"},
-                    "message": "Exact SHA-256 match. File identity VERIFIED; runtime GPU loading not tested.",
-                    "match": {k: candidate.get(k) for k in ("repo", "path", "label", "revision")},
-                    "sha256": digest, "bytes": before[2]}
-    return {"state": "different", "path": path, **{k: v for k, v in structural.items() if k != "state"},
-            "message": "SHA-256 differs from every catalog-approved build. This may be a custom model, but it is NOT verified for this slot.",
-            "sha256": digest, "checked": [c["label"] for c in plausible]}
+                "expected": [{"label": c["label"], "bytes": c.get("size")} for c in candidates]}
+    return {"state": "different", "path": path, **structural,
+            "message": "SHA-256 differs from the approved builds. This could be a custom model; architecture and runtime compatibility are unverified.",
+            "sha256": digest, "checked": [c["label"] for c in plausible],
+            "structures": uncertain_layouts[:3]}
 
 
 def _catalog(family_key, key):
