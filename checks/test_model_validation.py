@@ -142,3 +142,37 @@ def test_layout_match_tolerates_weight_dtype_changes_but_not_shape_changes(tmp_p
         "sha256": "0" * 64, "size": 1000000,
         "tensors": {key: [4] for key in keys}})
     assert result["state"] == "layout_match"
+
+
+
+def test_dit_file_is_rejected_in_training_adapter_slot(tmp_path):
+    file = tmp_path / "not-an-adapter.safetensors"
+    _safetensors(file, _keys(24))
+    result = validate_path(str(file), _model(role="training_adapter"),
+                           lookup=lambda *_: {"sha256": "0" * 64})
+    assert result["state"] == "invalid"
+    assert "Wrong component" in result["message"]
+
+
+def test_pinned_reference_conflict_cannot_be_approved_by_new_hub_commit(tmp_path):
+    file = tmp_path / "text-encoder.safetensors"
+    keys = [f"model.layers.{i}.self_attn.q_proj.weight" for i in range(24)]
+    _safetensors(file, keys)
+    build = SimpleNamespace(repo="community/encoder", path="text.safetensors",
+                            label="verified build", sha256="1" * 64)
+    result = validate_path(str(file), _model(role="text_encoder", repo="", path=""),
+                           builds=[build], lookup=lambda *_: {
+                               "sha256": "2" * 64, "size": file.stat().st_size})
+    assert result["state"] == "unverified"
+    assert "conflicts" in result["reference_errors"][0]
+
+
+def test_declared_checksum_survives_missing_hub_digest(tmp_path):
+    file = tmp_path / "text-encoder.safetensors"
+    keys = [f"model.layers.{i}.self_attn.q_proj.weight" for i in range(24)]
+    digest = _safetensors(file, keys)
+    build = SimpleNamespace(repo="community/encoder", path="text.safetensors",
+                            label="known build", sha256=digest)
+    result = validate_path(str(file), _model(role="text_encoder", repo="", path=""),
+                           builds=[build], lookup=lambda *_: {"sha256": "", "size": file.stat().st_size})
+    assert result["state"] == "pass"
