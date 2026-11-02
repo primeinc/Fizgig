@@ -1026,43 +1026,49 @@ function mpRow(f, key, m) {
     el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
     ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, verification, message);
   const verifyButton = el("button", {class: "btn btn-sm", text: "Test model",
-    title: "Inspect the safetensors header and compare SHA-256 against the model catalog (no GPU load)."});
+    disabled: !raw.trim(),
+    title: "Check the model's full tensor layout and official checksum without loading it onto the GPU."});
+  const cancelButton = el("button", {class: "btn btn-sm", text: "Cancel", hidden: true,
+    title: "Stop the current disk verification.",
+    onclick: () => api("/api/models/verify/cancel", {family: f.key, key}).catch(
+      (error) => { verification.textContent = "Could not cancel: " + error.message; })});
   const verify = async () => {
+    if (verifyButton.disabled) return;
     verifyButton.disabled = true;
+    cancelButton.hidden = false;
     verification.textContent = "Starting…";
     try {
       await pending;
-      const started = await api("/api/models/verify", {family: f.key, key});
-      if (started.state !== "running") throw new Error(started.message || "Not started");
-      const watch = async () => {
-        const result = await api("/api/models/verify/status?family=" +
+      let result = await api("/api/models/verify", {family: f.key, key});
+      while (result.state === "running") {
+        const percent = result.total ? " " + Math.floor(100 * result.done / result.total) + "%" : "";
+        verification.textContent = "Testing " + (result.stage || "model") + percent + "…";
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        result = await api("/api/models/verify/status?family=" +
           encodeURIComponent(f.key) + "&key=" + encodeURIComponent(key));
-        if (result.state === "running") {
-          const percent = result.total ? " " + Math.floor(100 * result.done / result.total) + "%" : "";
-          verification.textContent = "Testing " + (result.stage || "model") + percent + "…";
-          setTimeout(() => { if (verifyButton.isConnected) watch().catch((e) => {
-            verification.textContent = e.message; verifyButton.disabled = false;
-          }); }, 600);
-          return;
-        }
-        const names = {pass: "Verified identity", layout_match: "Architecture matches",
-          layout_mismatch: "Wrong architecture", different: "Different build",
-          unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
-        verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
-        verification.title = JSON.stringify(result.match || result.expected || result.reference_errors || {});
-        verification.dataset.result = result.state;
-        verifyButton.disabled = false;
-      };
-      await watch();
-    } catch (e) {
-      verification.textContent = "Test failed: " + e.message;
-      verifyButton.disabled = false;
+      }
+      const names = {pass: "Verified identity", layout_match: "Architecture matches",
+        layout_mismatch: "Wrong architecture", different: "Different build",
+        unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
+      verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
+      verification.title = JSON.stringify(result.match || result.structure ||
+        result.structures || result.expected || result.reference_errors || {});
+      verification.dataset.result = result.state;
+      return result;
+    } catch (error) {
+      verification.textContent = "Test failed: " + error.message;
+      verification.dataset.result = "error";
+      return null;
+    } finally {
+      cancelButton.hidden = true;
+      verifyButton.disabled = !String(S.prefs[key] || "").trim();
     }
   };
   verifyButton.addEventListener("click", verify);
+  (S.mpVerifyTasks ||= {})[key] = {run: verify, path: raw};
   const actions = el("div", {class: "mp-model-actions"},
     el("button", {class: "btn btn-sm", text: "Choose…", title: "Choose a local model file", onclick: () =>
-      pick(input.value, false, (picked) => savePath(picked))}), verifyButton, clear);
+      pick(input.value, false, (picked) => savePath(picked))}), verifyButton, cancelButton, clear);
   if (m.repo && m.path) actions.append(el("a", {class: "btn btn-sm",
     target: "_blank", rel: "noopener", href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path,
     text: "Download ↗", title: "Open the official download page; does not start a background download"}));
@@ -1121,19 +1127,11 @@ function mpToolbar(families, f) {
   testAll.addEventListener("click", async () => {
     testAll.disabled = true;
     try {
-      const rows = [...document.querySelectorAll(".mp-model-row")];
-      const buttons = rows.filter((row) => (S.prefs[row.dataset.key] || "").trim())
-        .map((row) => row.querySelector(".mp-model-actions button:nth-child(2)")).filter(Boolean);
-      for (const button of buttons) {
-        if (!testAll.isConnected) break;
-        button.click();
-        let spins = 0;
-        while (button.disabled && spins < 3600) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          spins++;
-        }
-        if (spins >= 3600) break;
-      }
+      // Keep stable task references so UI refreshes cannot detach the bulk
+      // queue or turn a CSS selector into model identity.
+      const tasks = mpModels(f).map(([key]) => S.mpVerifyTasks?.[key])
+        .filter((task) => task && task.path.trim());
+      for (const task of tasks) await task.run();
     } finally { testAll.disabled = false; }
   });
   const top = el("div", {class: "mp-workspace-head"},
@@ -1200,6 +1198,7 @@ function renderPrefs() {
   host.replaceChildren();
   S.fetchRows = {};
   S.mpRows = {};
+  S.mpVerifyTasks = {};
   const families = S.schema.families.filter((f) => !f.prefs_skip);
   const selected = families.find((f) => f.key === S.mpFamily) ||
     families.find((f) => f.key === S.family) || families[0];
