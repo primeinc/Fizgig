@@ -1004,7 +1004,7 @@ function mpRow(f, key, m) {
   };
   input.addEventListener("input", () => { clear.disabled = !input.value.trim(); });
   input.addEventListener("change", () => savePath(input.value));
-  const statusName = st.exists ? "Ready" : state === "stale" ? "Missing file" : "Not selected";
+  const statusName = st.exists ? "On disk" : state === "stale" ? "Missing file" : "Not selected";
   const status = mpChip(statusName, state);
   const role = MP_ROLES[m.role] || "Model";
   const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
@@ -1048,7 +1048,7 @@ function mpRow(f, key, m) {
           encodeURIComponent(f.key) + "&key=" + encodeURIComponent(key));
       }
       const names = {pass: "Verified identity", layout_match: "Architecture matches",
-        layout_mismatch: "Wrong architecture", different: "Different build",
+        layout_mismatch: "Layout mismatch", different: "Different build",
         unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
       verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
       verification.title = JSON.stringify(result.match || result.structure ||
@@ -1116,14 +1116,14 @@ function mpToolbar(families, f) {
   selector.value = f.key;
   const summary = el("div", {class: "mp-summary"},
     el("div", {class: "mp-metric"}, el("strong", {text: totals.ready + " / " + totals.total}),
-      el("small", {text: "models ready"})),
+      el("small", {text: "model paths found (not validated)"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.disk)}),
       el("small", {text: totals.folders ?
         "measured file bytes · " + totals.folders + " folder(s) unmeasured" : "measured file bytes"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.remaining, true)}),
       el("small", {text: "required downloads left"})));
   const testAll = el("button", {class: "btn", text: "Test selected models",
-    title: "Queue identity checks for each saved model of this family, one file at a time."});
+    title: "Run one model identity/architecture check at a time; no GPU weights are loaded."});
   testAll.addEventListener("click", async () => {
     testAll.disabled = true;
     try {
@@ -1169,7 +1169,7 @@ function mpToolbar(families, f) {
     if (empty) empty.hidden = shown > 0;
   };
   search.addEventListener("input", () => { S.mpQuery = search.value; applyFilter(); });
-  const filters = [["all","All"], ["ready","Ready"], ["missing","Missing"], ["optional","Optional"]];
+  const filters = [["all","All"], ["ready","On disk"], ["missing","Missing"], ["optional","Optional"]];
   for (const [key,label] of filters) filterHost.append(el("button", {
     class: "mp-filter" + ((S.mpFilter || "all") === key ? " active" : ""),
     "aria-pressed": (S.mpFilter || "all") === key ? "true" : "false", text: label, onclick: () => {
@@ -1190,7 +1190,7 @@ function mpFamilyCard(f) {
   return el("div", {class: "section-card mp-library-card", "data-model-family": f.key},
     el("div", {class: "mp-library-caption"},
       el("b", {text: f.display_name}),
-      el("span", {text: "Choose or clear a file path, or open its official download page. Nothing is deleted here."})),
+      el("span", {text: "On disk means only that the path exists. Use Test model to check its identity and tensor layout. No files are deleted."})),
     body, mpOptionalPanel(f), panel);
 }
 function renderPrefs() {
