@@ -266,6 +266,9 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
     layout = structural.pop("_layout", {})
     if structural["state"] != "inspected":
         return {**structural, "path": path}
+    # Internal parse state is not a validation verdict. If retained it would
+    # overwrite every pass/different/layout_match result in dictionary merges.
+    structural.pop("state")
     role = getattr(model, "role", "") if model is not None else ""
     if _wrong_kind(structural["kind"], role, getattr(model, "inside", "") if model else ""):
         return {"state": "invalid", "path": path, **{k: v for k, v in structural.items() if k != "state"},
