@@ -1004,7 +1004,7 @@ function mpRow(f, key, m) {
   };
   input.addEventListener("input", () => { clear.disabled = !input.value.trim(); });
   input.addEventListener("change", () => savePath(input.value));
-  const statusName = st.exists ? "Ready" : state === "stale" ? "Missing file" : "Not selected";
+  const statusName = st.exists ? "On disk" : state === "stale" ? "Missing file" : "Not selected";
   const status = mpChip(statusName, state);
   const role = MP_ROLES[m.role] || "Model";
   const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
@@ -1020,12 +1020,55 @@ function mpRow(f, key, m) {
     (st.directory ? "Model folder ready · size unmeasured" : mpSize(st.bytes) + " on disk") :
     state === "stale" ? "Saved path no longer exists" : "No local model selected";
   const catalogSize = m.size_gb ? "Catalog estimate " + Number(m.size_gb).toFixed(2) + " GB" : "";
+  const verification = el("span", {class: "mp-row-progress", role: "status",
+    text: "Not tested", title: "Path existence does not verify model identity."});
   const meta = el("div", {class: "mp-model-meta"},
     el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
-    ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, message);
+    ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, verification, message);
+  const verifyButton = el("button", {class: "btn btn-sm", text: "Test model",
+    disabled: !raw.trim(),
+    title: "Check the model's full tensor layout and official checksum without loading it onto the GPU."});
+  const cancelButton = el("button", {class: "btn btn-sm", text: "Cancel", hidden: true,
+    title: "Stop the current disk verification.",
+    onclick: () => api("/api/models/verify/cancel", {family: f.key, key}).catch(
+      (error) => { verification.textContent = "Could not cancel: " + error.message; })});
+  const verify = async () => {
+    if (verifyButton.disabled) return;
+    verifyButton.disabled = true;
+    cancelButton.hidden = false;
+    verification.textContent = "Starting…";
+    try {
+      await pending;
+      let result = await api("/api/models/verify", {family: f.key, key});
+      while (result.state === "running") {
+        const percent = result.total ? " " + Math.floor(100 * result.done / result.total) + "%" : "";
+        verification.textContent = "Testing " + (result.stage || "model") + percent + "…";
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        result = await api("/api/models/verify/status?family=" +
+          encodeURIComponent(f.key) + "&key=" + encodeURIComponent(key));
+      }
+      const names = {pass: "Verified identity", layout_match: "Architecture matches",
+        layout_mismatch: "Layout mismatch", different: "Different build",
+        unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
+      verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
+      verification.title = JSON.stringify(result.match || result.structure ||
+        result.structures || result.expected || result.reference_errors || {});
+      verification.dataset.result = result.state;
+      return result;
+    } catch (error) {
+      verification.textContent = "Test failed: " + error.message;
+      verification.dataset.result = "error";
+      return null;
+    } finally {
+      cancelButton.hidden = true;
+      verifyButton.disabled = !String(S.prefs[key] || "").trim();
+    }
+  };
+  verifyButton.addEventListener("click", verify);
+  (S.mpVerifyTasks ||= {})[key] = {run: verify, path: raw};
   const actions = el("div", {class: "mp-model-actions"},
     el("button", {class: "btn btn-sm", text: "Choose…", title: "Choose a local model file", onclick: () =>
-      pick(input.value, false, (picked) => savePath(picked))}), clear);
+      pick(input.value, false, (picked) => savePath(picked))}), verifyButton, cancelButton, clear);
   if (m.repo && m.path) actions.append(el("a", {class: "btn btn-sm",
     target: "_blank", rel: "noopener", href: "https://huggingface.co/" + m.repo + "/blob/main/" + m.path,
     text: "Download ↗", title: "Open the official download page; does not start a background download"}));
@@ -1073,16 +1116,28 @@ function mpToolbar(families, f) {
   selector.value = f.key;
   const summary = el("div", {class: "mp-summary"},
     el("div", {class: "mp-metric"}, el("strong", {text: totals.ready + " / " + totals.total}),
-      el("small", {text: "models ready"})),
+      el("small", {text: "model paths found (not validated)"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.disk)}),
       el("small", {text: totals.folders ?
         "measured file bytes · " + totals.folders + " folder(s) unmeasured" : "measured file bytes"})),
     el("div", {class: "mp-metric"}, el("strong", {text: mpSize(totals.remaining, true)}),
       el("small", {text: "required downloads left"})));
+  const testAll = el("button", {class: "btn", text: "Test selected models",
+    title: "Run one model identity/architecture check at a time; no GPU weights are loaded."});
+  testAll.addEventListener("click", async () => {
+    testAll.disabled = true;
+    try {
+      // Keep stable task references so UI refreshes cannot detach the bulk
+      // queue or turn a CSS selector into model identity.
+      const tasks = mpModels(f).map(([key]) => S.mpVerifyTasks?.[key])
+        .filter((task) => task && task.path.trim());
+      for (const task of tasks) await task.run();
+    } finally { testAll.disabled = false; }
+  });
   const top = el("div", {class: "mp-workspace-head"},
     el("div", {class: "mp-title-stack"}, el("h2", {text: "Model library"}),
       el("p", {text: "One family at a time. Reuse local files before downloading anything."})),
-    el("div", {class: "mp-toolbar-actions"},
+    el("div", {class: "mp-toolbar-actions"}, testAll,
       el("button", {class: "btn", text: "Search locally", title: "Search all saved model directories; no downloads",
         onclick: () => startModelSearch("")}),
       el("button", {class: "btn btn-primary", text: "Download missing…",
@@ -1114,7 +1169,7 @@ function mpToolbar(families, f) {
     if (empty) empty.hidden = shown > 0;
   };
   search.addEventListener("input", () => { S.mpQuery = search.value; applyFilter(); });
-  const filters = [["all","All"], ["ready","Ready"], ["missing","Missing"], ["optional","Optional"]];
+  const filters = [["all","All"], ["ready","On disk"], ["missing","Missing"], ["optional","Optional"]];
   for (const [key,label] of filters) filterHost.append(el("button", {
     class: "mp-filter" + ((S.mpFilter || "all") === key ? " active" : ""),
     "aria-pressed": (S.mpFilter || "all") === key ? "true" : "false", text: label, onclick: () => {
@@ -1135,7 +1190,7 @@ function mpFamilyCard(f) {
   return el("div", {class: "section-card mp-library-card", "data-model-family": f.key},
     el("div", {class: "mp-library-caption"},
       el("b", {text: f.display_name}),
-      el("span", {text: "Choose or clear a file path, or open its official download page. Nothing is deleted here."})),
+      el("span", {text: "On disk means only that the path exists. Use Test model to check its identity and tensor layout. No files are deleted."})),
     body, mpOptionalPanel(f), panel);
 }
 function renderPrefs() {
@@ -1143,6 +1198,7 @@ function renderPrefs() {
   host.replaceChildren();
   S.fetchRows = {};
   S.mpRows = {};
+  S.mpVerifyTasks = {};
   const families = S.schema.families.filter((f) => !f.prefs_skip);
   const selected = families.find((f) => f.key === S.mpFamily) ||
     families.find((f) => f.key === S.family) || families[0];

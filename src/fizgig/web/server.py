@@ -3012,6 +3012,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"user": "admin", "password": None, "login": (fm or {}).get("login")})
             return self.json({"user": "admin", "login": fm["login"],
                               "password": pw.ljust(12, "0") if fm["login"] == "padded" else pw})
+        if path == "/api/models/verify/status":
+            from fizgig.web import model_validation
+            family = (qs.get("family") or [""])[0]
+            key = (qs.get("key") or [""])[0]
+            return self.json(model_validation.status(family, key))
         if path == "/api/prefs":
             from fizgig.web import model_inventory, pod_stop
             p = load_prefs()
@@ -4243,6 +4248,26 @@ class Handler(BaseHTTPRequestHandler):
                     _run["pause"] = True
                 append_log("\n⏸ Pause requested: the run stops cleanly at the end of this epoch.\n")
                 return self.json({"ok": True})
+            if path == "/api/models/verify":
+                from fizgig.web import model_validation
+                family, key = str(b.get("family") or ""), str(b.get("key") or "")
+                try:
+                    from fizgig.families import form, registry
+                    desc = registry.get(family)
+                    if not desc or key not in form.model_keys(desc):
+                        raise ValueError("Unknown model family or slot.")
+                    # Verify the user's currently saved file, not an arbitrary path
+                    # supplied by a remote browser.
+                    stored = pref_path(load_prefs(), key)
+                    if not stored:
+                        raise ValueError("Save a model path before testing.")
+                    return self.json(model_validation.start(family, key, stored))
+                except ValueError as exc:
+                    return self.json({"error": str(exc)}, 400)
+            if path == "/api/models/verify/cancel":
+                from fizgig.web import model_validation
+                return self.json({"ok": model_validation.cancel(
+                    str(b.get("family") or ""), str(b.get("key") or ""))})
             if path == "/api/models/discover":
                 try:
                     _start_model_search(b.get("family"), b.get("choices") if isinstance(b.get("choices"), dict) else None)
