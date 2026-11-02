@@ -84,3 +84,61 @@ def test_missing_shard_fails(tmp_path):
 
 def test_unknown_tensor_kind_is_not_guessed():
     assert _fingerprint(["unfamiliar.model.weight"]) == "unknown"
+
+
+
+def _keys(n=48):
+    return [f"transformer_blocks.{i}.attn.to_q.weight" for i in range(n)]
+
+
+def test_custom_weights_with_matching_architecture_are_not_called_wrong_model(tmp_path):
+    file = tmp_path / "custom-finetune.safetensors"
+    keys = _keys()
+    _safetensors(file, keys)
+    result = validate_path(str(file), _model(), lookup=lambda *_: {
+        "sha256": "0" * 64, "size": file.stat().st_size,
+        "revision": "d" * 40, "tensors": {key: [4] for key in keys}})
+    assert result["state"] == "layout_match"
+    assert result["structure"]["matched"] == len(keys)
+    assert "NOT verified" in result["message"]
+
+
+def test_different_model_architecture_is_detected_by_tensor_names(tmp_path):
+    file = tmp_path / "actually-other-family.safetensors"
+    keys = _keys()
+    _safetensors(file, keys)
+    result = validate_path(str(file), _model(), lookup=lambda *_: {
+        "sha256": "0" * 64, "size": file.stat().st_size,
+        "tensors": {f"completely_other_family.{i}.weight": [4] for i in range(48)}})
+    assert result["state"] == "layout_mismatch"
+    assert result["structures"][0]["common"] == 0
+
+
+def test_similar_tensor_names_with_wrong_dimensions_are_rejected(tmp_path):
+    file = tmp_path / "wrong-size-architecture.safetensors"
+    keys = _keys()
+    _safetensors(file, keys)
+    result = validate_path(str(file), _model(), lookup=lambda *_: {
+        "sha256": "0" * 64, "size": file.stat().st_size,
+        "tensors": {key: [999] for key in keys}})
+    assert result["state"] == "layout_mismatch"
+    assert result["structures"][0]["wrong_shapes"] == len(keys)
+
+
+def test_tiny_matching_header_is_not_claimed_compatible(tmp_path):
+    file = tmp_path / "tiny.safetensors"
+    _safetensors(file, ["transformer_blocks.0.weight"])
+    result = validate_path(str(file), _model(), lookup=lambda *_: {
+        "sha256": "0" * 64, "size": file.stat().st_size,
+        "tensors": {"transformer_blocks.0.weight": [4]}})
+    assert result["state"] == "different"  # insufficient structural evidence
+
+
+def test_layout_match_tolerates_weight_dtype_changes_but_not_shape_changes(tmp_path):
+    file = tmp_path / "quantized.safetensors"
+    keys = _keys()
+    _safetensors(file, keys)
+    result = validate_path(str(file), _model(), lookup=lambda *_: {
+        "sha256": "0" * 64, "size": 1000000,
+        "tensors": {key: [4] for key in keys}})
+    assert result["state"] == "layout_match"
