@@ -71,7 +71,8 @@ def _wrong_kind(kind, role, inside=""):
     # unmistakable LoRA-for-base / base-for-LoRA or VAE-for-base swaps.
     if kind == "lora" and role not in ("speed_lora", "look_lora", "training_adapter", "model_eq"):
         return True
-    if kind in ("vae", "dit", "checkpoint") and role in ("speed_lora", "look_lora", "model_eq"):
+    if kind in ("vae", "dit", "checkpoint") and role in ("speed_lora", "look_lora", "model_eq",
+                                                     "training_adapter"):
         return True
     if kind == "vae" and role in ("dit", "ref_dit", "preview_dit", "text_encoder"):
         return True
@@ -291,7 +292,14 @@ def validate_path(path, model, *, builds=(), alias_models=(), lookup=None,
         source = dict(item)
         try:
             remote = resolve(item["repo"], item["path"])
-            source.update({k: v for k, v in remote.items() if v is not None})
+            pinned = (item.get("sha256") or "").lower()
+            upstream = (remote.get("sha256") or "").lower()
+            if pinned and upstream and pinned != upstream:
+                # A newer Hub artifact is not automatically an approved build.
+                errors.append(item["label"] + ": declared SHA-256 conflicts with Hub reference")
+                continue
+            source.update({k: v for k, v in remote.items() if v is not None
+                           and (k != "sha256" or v)})
         except Exception as exc:
             errors.append(item["label"] + ": " + str(exc)[:110])
         if isinstance(source.get("sha256"), str) and len(source["sha256"]) == 64:
