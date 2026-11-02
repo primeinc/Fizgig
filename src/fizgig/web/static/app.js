@@ -1020,11 +1020,11 @@ function mpRow(f, key, m) {
     (st.directory ? "Model folder ready · size unmeasured" : mpSize(st.bytes) + " on disk") :
     state === "stale" ? "Saved path no longer exists" : "No local model selected";
   const catalogSize = m.size_gb ? "Catalog estimate " + Number(m.size_gb).toFixed(2) + " GB" : "";
+  const verification = el("span", {class: "mp-row-progress", role: "status",
+    text: "Not tested", title: "Path existence does not verify model identity."});
   const meta = el("div", {class: "mp-model-meta"},
     el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
     ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, verification, message);
-  const verification = el("span", {class: "mp-row-progress", role: "status",
-    text: "Not tested", title: "Path existence does not verify model identity."});
   const verifyButton = el("button", {class: "btn btn-sm", text: "Test model",
     title: "Inspect the safetensors header and compare SHA-256 against the model catalog (no GPU load)."});
   const verify = async () => {
@@ -1045,7 +1045,8 @@ function mpRow(f, key, m) {
           }); }, 600);
           return;
         }
-        const names = {pass: "Verified", different: "Wrong build / custom",
+        const names = {pass: "Verified identity", layout_match: "Architecture matches",
+          layout_mismatch: "Wrong architecture", different: "Different build",
           unverified: "Unverified", invalid: "Invalid file", cancelled: "Cancelled", error: "Error"};
         verification.textContent = (names[result.state] || result.state) + ": " + (result.message || "");
         verification.title = JSON.stringify(result.match || result.expected || result.reference_errors || {});
