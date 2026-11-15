@@ -24,7 +24,7 @@ jobs:
           pip install -r checks/requirements.txt
       - name: Python files compile
         run: python -m compileall -q src
-      - name: Web UI scripts parse
-        run: for f in src/fizgig/web/static/*.js; do node --check "$f"; done
+      - name: Web UI scripts parse (recursive, including fork extensions)
+        run: python checks/js_parse_gate.py
       - name: Checks
         run: python -m pytest checks -q
