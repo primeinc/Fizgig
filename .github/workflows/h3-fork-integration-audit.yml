@@ -1,0 +1,32 @@
+name: H3 Image fork integration audit
+on:
+  push:
+    branches:
+      - audit/h3-fork-integration-2026-11-15
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install CPU test dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r checks/requirements.txt
+      - name: H3 specific fork integration tests
+        run: python -m pytest checks/test_h3_fork_integration.py -q -vv
+      - name: Full canonical checks
+        run: |
+          python -m compileall -q src
+          for f in src/fizgig/web/static/*.js; do node --check "$f"; done
+          python -m pytest checks -q
