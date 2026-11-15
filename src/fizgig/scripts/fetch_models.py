@@ -382,8 +382,9 @@ def _configured_file(value, repo_dir=None):
 def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alternates=False):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
-    A user-picked alternate build and replacement for a retired filename are exceptions:
-    the previous file must not suppress the newly chosen build.
+    The fork's explicit-path policy takes precedence over upstream switch_from/replaces
+    hints. A valid configured file stays selected until the user clears the row.
+    Discovery can find alternate builds only when a model is otherwise unresolved.
     """
     current = _configured_file(prefs.get(w.pref_key), repo_dir)
     if current:
@@ -660,8 +661,11 @@ def fetch_tool(spec, log=print, dry_run=False):
 
 
 def _chosen(w, choices):
-    """The build to fetch for a file with a choice: {pref_key: "main" | "alt"} picks one and lets it replace the other
-    (so a pref on the other moves); without a pick, the main file as before, the user's own file kept."""
+    """Select the proposed download build, without overriding an existing user path.
+    The web page sends a choice for each select even when the user did not
+    intentionally change it. Only clearing the saved path authorizes a new download.
+    The upstream switch_from metadata is retained for catalog provenance, not as
+    permission to replace a fork user's configured file."""
     pick = (choices or {}).get(getattr(w, "pref_key", ""))
     if getattr(w, "alt", None) is None or not getattr(w, "fetch_choice_enabled", True) or pick not in ("main", "alt"):     # the strangers pack has no build to pick
         return w

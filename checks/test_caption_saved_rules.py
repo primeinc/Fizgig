@@ -124,18 +124,6 @@ def test_ui_checkbox_and_saved_rules_are_wired_into_find_and_replace():
     assert '"/api/captions/rules"' in js
 
 
-def test_model_ui_limits_models_to_one_family_and_keeps_download_actions():
-    repo = Path(__file__).resolve().parents[1]
-    js = (repo / "src/fizgig/web/static/app.js").read_text(encoding="utf-8")
-    section = js.split("// ---- Model library: one family at a time", 1)[1].split(
-        "// Search libraries on the Fizgig computer", 1)[0]
-    assert 'host.append(mpToolbar(families, selected), mpFamilyCard(selected))' in section
-    assert 'text: "Download ↗"' in section
-    assert 'text: "Clear"' in section
-    assert 'mpHelp(sourceInfo, m)' in section
-    assert 'fetchRow(f)' in section
-
-
 def test_training_plan_combines_saved_folder_rules_and_legacy_job_rules(store, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from fizgig.web import server

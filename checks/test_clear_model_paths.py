@@ -41,8 +41,8 @@ def test_clearing_secondary_captioner_keeps_the_file(tmp_path, monkeypatch):
 
 def test_preferences_model_path_rows_have_clear_actions():
     app = (Path(__file__).resolve().parents[1] /
-           "src" / "fizgig" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-    # Rows are now rendered by one reusable component, not repeated in renderPrefs().
+           "src" / "fizgig" / "web" / "static" / "fork" / "model-library.js").read_text(encoding="utf-8")
+    # This fork-owned module is loaded through the upstream Preferences render seam.
     prefs_section = app.split("function mpRow(", 1)[1].split(
         "function mpOptionalPanel(", 1)[0]
     assert 'text: "Clear"' in prefs_section
@@ -50,7 +50,10 @@ def test_preferences_model_path_rows_have_clear_actions():
     assert 'const clear = el("button"' in prefs_section
     assert "S.prefs[key] = next;" in prefs_section
     assert 'changes: {[key]: next}' in prefs_section
-    caption_section = app.split("function captionerCard() {", 1)[1].split(
+    # The secondary captioner remains an upstream card, not part of the model-library extension.
+    upstream = (Path(__file__).resolve().parents[1] /
+                "src/fizgig/web/static/app.js").read_text(encoding="utf-8")
+    caption_section = upstream.split("function captionerCard() {", 1)[1].split(
         "// a folder setting the two apps share", 1)[0]
     assert 'onclick: () => save("")' in caption_section
     assert "changes: {captioner_secondary: next}" in caption_section
