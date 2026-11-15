@@ -125,6 +125,22 @@ assert(rows(host).includes("future_model_dit"), "Future family is absent from sc
 assert(hrefs(host).some(s => s.includes("ExampleOrg/NewModel")), "Future model metadata not rendered");
 assert(classCount(host, "mp-library-card") === 1);
 
+// Ready is the server's identity verdict: a file that exists but holds another model's weights is not Ready.
+const rowOf = key => walk(host, n => n.props?.["data-key"] === key)[0];
+const chipOf = key => walk(rowOf(key), n => String(n.props?.class || "").split(/\s+/).includes("mp-chip"))[0];
+S.prefs.future_model_dit = "/models/new_model.safetensors";
+const onDisk = {exists:true, bytes:10, expected_bytes:10, path:"/models/new_model.safetensors", required:true};
+S.modelInventory = {files:{future_model_dit:{...onDisk, ready:false, wrong_file:true}}};
+mock.renderPrefs();
+assert.equal(rowOf("future_model_dit").props["data-status"], "wrong", "Another model's file is shown as Ready");
+assert.equal(chipOf("future_model_dit").textContent, "Wrong file");
+S.modelInventory = {files:{future_model_dit:{...onDisk, ready:true, wrong_file:false}}};
+mock.renderPrefs();
+assert.equal(rowOf("future_model_dit").props["data-status"], "ready");
+assert.equal(chipOf("future_model_dit").textContent, "Ready");
+S.prefs.future_model_dit = "";
+S.modelInventory = {files:{}};
+
 // Negative control: remove a required model row and verify the same contract flags it.
 const originalKeys = future.model_keys;
 future.model_keys = [];

@@ -3,11 +3,24 @@
 File sizes are measured logical bytes. Existing model directories are usable but
 not recursively measured: scanning tens of thousands of model files on every
 Preferences refresh would be expensive. Missing sizes are approximate.
+
+A file is ready when it exists and, for a model that declares a header signature
+(ModelFile.signature), its header does not prove it holds another model's weights.
+A file that does is reported as the wrong file, not ready.
 """
 import os
 
 
 GIB = 1024 ** 3
+
+
+def holds_other_model(path, model):
+    """True when `model` declares a signature and the header of the file at `path` proves it is another model's."""
+    signature = tuple(getattr(model, "signature", ()) or ()) if model else ()
+    if not signature:
+        return False
+    from fizgig.scripts.fetch_models import is_other_file
+    return is_other_file(path, signature)
 
 
 def inventory(prefs, families, repo_dir, key_resolver=None):
@@ -33,12 +46,14 @@ def inventory(prefs, families, repo_dir, key_resolver=None):
                         size = os.path.getsize(path)
             except OSError:
                 exists, directory, size = False, False, 0
+            wrong = exists and not directory and holds_other_model(path, model)
             nominal = max(0, round(float(model.size_gb or 0) * GIB)) if model else 0
             if model and getattr(model, "same_as", ""):
                 aliases[key] = model.same_as
             previous = entries.get(key)
             if previous is None:
-                entries[key] = {"exists": exists, "directory": directory,
+                entries[key] = {"exists": exists, "ready": exists and not wrong, "wrong_file": wrong,
+                                "directory": directory,
                                 "configured": bool(original), "bytes": size,
                                 "expected_bytes": nominal,
                                 "required": bool(model.required) if model else False,
@@ -60,17 +75,19 @@ def inventory(prefs, families, repo_dir, key_resolver=None):
         group = shared.setdefault(shared_identity(key), {
             "exists": False, "required": False, "expected_bytes": 0
         })
-        group["exists"] |= item["exists"]
+        group["exists"] |= item["ready"]
         group["required"] |= item["required"]
         group["expected_bytes"] = max(group["expected_bytes"], item["expected_bytes"])
 
     unique_files = set()
     disk_bytes = 0
-    found = missing = stale = optional = folder_count = 0
+    found = missing = stale = wrong = optional = folder_count = 0
     for item in entries.values():
         if not item["required"]:
             optional += 1
-        if item["exists"]:
+        if item["wrong_file"]:
+            wrong += 1
+        elif item["exists"]:
             found += 1
             if item["directory"]:
                 folder_count += 1
@@ -88,7 +105,7 @@ def inventory(prefs, families, repo_dir, key_resolver=None):
     optional_remaining = sum(g["expected_bytes"] for g in shared.values()
                              if not g["exists"] and not g["required"])
     return {"files": entries, "summary": {
-        "count": len(entries), "found": found, "missing": missing, "stale": stale,
+        "count": len(entries), "found": found, "missing": missing, "stale": stale, "wrong": wrong,
         "optional": optional, "disk_bytes": disk_bytes, "folder_count": folder_count,
         "remaining_required_bytes": required_remaining,
         "remaining_optional_bytes": optional_remaining,
