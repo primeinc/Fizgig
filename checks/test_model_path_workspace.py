@@ -1,43 +1,34 @@
-"""Code contracts for schema-driven Model Paths UI.
+"""Exercise the fork model library at its real upstream Preferences render seam.
 
-No fake hard-coded model catalog and no destructive replacement of the
-per-family downloader. Actual DOM is checked by the JavaScript parse stage.
+The implementation is not protected by source-string equality tests: Node executes
+the current upstream renderer and the separate fork adapter against a real model
+family, a synthetic future family, and deliberate failing controls.
 """
+import json
+import subprocess
 from pathlib import Path
 
+from fizgig.web.schema import get_schema
 
-def app_source():
-    return (Path(__file__).resolve().parents[1] /
-            "src/fizgig/web/static/app.js").read_text(encoding="utf-8")
-
-
-def test_workspace_shares_family_descriptions_and_original_download_controls():
-    source = app_source()
-    section = source.split("// ---- Model library: one family at a time", 1)[1].split(
-        "// Search libraries on the Fizgig computer", 1)[0]
-    assert section.count("function mpRow(") == 1
-    assert section.count("function renderPrefs()") == 1
-    assert "mpModels(f)" in section
-    assert "S.schema.families.filter" in section
-    assert "fetchRow(f)" in section
-    assert "modelFiles =" not in section
-    assert "mpRefresh()" in section
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_all_model_rows_have_keyboard_accessible_details_and_clear():
-    section = app_source().split("function mpRow(", 1)[1].split("function mpOptionalPanel(", 1)[0]
-    assert "mpHelp(sourceInfo, m)" in section
-    assert '"aria-label": "Model information"' in app_source()
-    assert 'onclick: () => savePath("")' in section
-    assert "changes: {[key]: next}" in section
-    assert '"https://huggingface.co/"' in section
+def test_schema_driven_fork_library_renders_without_upstream_model_overrides():
+    family = next(f for f in get_schema()["families"] if f["key"] == "minimax_image")
+    result = subprocess.run(
+        ["node", "checks/model_library_contract.cjs"],
+        cwd=ROOT, input=json.dumps(family), text=True,
+        capture_output=True, check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+    assert "fallback and negative controls" in result.stdout
 
 
-def test_storage_metrics_are_bound_to_server_inventory_not_guessing_from_textboxes():
-    section = app_source().split("// ---- Model library: one family at a time", 1)[1].split(
-        "// Search libraries on the Fizgig computer", 1)[0]
-    assert "S.modelInventory?.files" in section
-    assert "st.bytes" in section
-    assert "totals.remaining" in section
-    assert "mpSize(st.total)" in app_source()
-    assert "st.total - st.done" in app_source()
+def test_fork_assets_are_explicitly_served_and_included_in_page():
+    """The browser must receive the extension before app.js evaluates boot()."""
+    html = (ROOT / "src/fizgig/web/static/index.html").read_text(encoding="utf-8")
+    server = (ROOT / "src/fizgig/web/server.py").read_text(encoding="utf-8")
+    assert html.index("/fork-model-library.js") < html.index('src="/app.js"')
+    assert html.index("/style.css") < html.index("/fork-model-library.css")
+    assert server.count('"/fork-model-library.js"') == 1
+    assert server.count('"/fork-model-library.css"') == 1
