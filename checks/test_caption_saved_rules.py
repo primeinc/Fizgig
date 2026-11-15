@@ -116,12 +116,14 @@ def test_ui_checkbox_and_saved_rules_are_wired_into_find_and_replace():
     repo = Path(__file__).resolve().parents[1]
     html = (repo / "src/fizgig/web/static/index.html").read_text(encoding="utf-8")
     js = (repo / "src/fizgig/web/static/app.js").read_text(encoding="utf-8")
+    fork = (repo / "src/fizgig/web/static/fork/caption-rules.js").read_text(encoding="utf-8")
     for marker in ('id="frRemember"', 'id="capRulesEnabled"', 'id="capRulesList"',
                    'id="frAddRule"'):
         assert marker in html
-    assert 'if ($("frRemember").checked) await rememberCaptionRule()' in js
-    assert 'function renderCaptionRules()' in js
-    assert '"/api/captions/rules"' in js
+    assert 'if ($("frRemember").checked) await rememberCaptionRule()' in fork
+    assert 'function renderCaptionRules()' in fork
+    assert '"/api/captions/rules"' in fork
+    assert "window.FizgigForkCaptionRules" in js
 
 
 def test_training_plan_combines_saved_folder_rules_and_legacy_job_rules(store, tmp_path, monkeypatch):
