@@ -153,6 +153,7 @@ def _weight_from_file(f):
                optional=f.fetch_is_optional, gated=f.gated, local_name=f.local_name or None,
                replaces=f.replaces)
     w.same_as = f.same_as
+    w.signature = tuple(f.signature)
     if f.alt_repo and f.alt_path:
         w.alt = Weight(f.pref_key, f.alt_repo, f.alt_path, f.alt_size_gb or f.size_gb,
                        f"{f.label} — {f.alt_label or (f.fetch_choice[1] if f.fetch_choice else 'alternate')}",
