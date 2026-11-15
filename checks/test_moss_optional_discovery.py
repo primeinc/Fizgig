@@ -8,14 +8,17 @@ from fizgig.families.registry import FAMILIES
 from fizgig.scripts import fetch_models
 
 
-def test_optional_moss_loras_are_discoverable_not_bulk_downloadable():
+def test_moss_preview_loras_follow_current_bulk_and_on_demand_policy():
     family = FAMILIES["moss_image"]
-    optional = {f.pref_key for f in family.model_files if not f.bulk_fetch and f.repo and f.path}
-    assert {"moss_image_turbo_lora", "moss_image_sft_look_lora"} <= optional
+    by_key = {f.pref_key: f for f in family.model_files}
+    turbo, look = by_key["moss_image_turbo_lora"], by_key["moss_image_sft_look_lora"]
+    assert turbo.bulk_fetch and not turbo.fetch_on_use
+    assert not look.bulk_fetch and look.fetch_on_use
     findable = {w.pref_key for w in fetch_models.discovery_candidates(("moss_image",))}
     bulk = {w.pref_key for w in fetch_models.model_candidates(("moss_image",))}
-    assert optional <= findable
-    assert optional.isdisjoint(bulk)
+    assert {"moss_image_turbo_lora", "moss_image_sft_look_lora"} <= findable
+    assert "moss_image_turbo_lora" in bulk
+    assert "moss_image_sft_look_lora" not in bulk
 
 
 def test_moss_lora_files_in_uppercase_lora_folder_are_reused(tmp_path, monkeypatch):

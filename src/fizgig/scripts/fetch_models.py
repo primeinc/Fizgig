@@ -417,6 +417,88 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alte
     return None
 
 
+def _header_shape(path, name):
+    """The shape of tensor `name` in a .safetensors header, or None (unreadable, or no such tensor)."""
+    try:
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if n > 100_000_000:
+                return None
+            return tuple(json.loads(f.read(n)).get(name, {}).get("shape") or ()) or None
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def is_other_file(path, signature):
+    """True only when the header proves `path` is not the file `signature` describes (the tensor is there at
+    another shape); a file it can't read, or one without the tensor (another format), is never called wrong."""
+    if not signature:
+        return False
+    got = _header_shape(path, signature[0])
+    return got is not None and got != tuple(signature[1])
+
+
+def repair_links(prefs, models_dir, log=print):
+    """Prefs pointing at another model's file, found by ModelFile.signature: moved to the right file when one is
+    set for another model or sits in the models folder under this file's own name, else cleared so Download models
+    for me fetches it. A file in the models folder under one model's name holding another's goes to that one's name
+    when it is free, with the prefs on it, so the first model's download doesn't link it again. Klein 9B's FLUX.2 VAE
+    and Z-Image's FLUX.1 VAE were both saved as models/ae.safetensors before 9.0.5. Returns True when prefs changed."""
+    try:
+        sys.path.insert(0, os.path.join(REPO_DIR, "src"))
+        from fizgig.families.registry import FAMILIES as reg
+    except Exception:
+        return False
+    files = [f for d in reg.values() for f in d.model_files if getattr(f, "signature", ())]
+
+    def where(v):
+        v = str(v or "").strip()
+        return v if not v or os.path.isabs(v) else os.path.normpath(os.path.join(REPO_DIR, v))
+
+    def same(a, b):
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+    def own(f):
+        return os.path.join(models_dir, f.local_name or os.path.basename(f.path))
+
+    changed = False
+    for f in files:                           # a models-folder file under this name holding another model's
+        p = own(f)
+        if not (os.path.isfile(p) and is_other_file(p, f.signature)):
+            continue
+        other = next((o for o in files if o.signature != f.signature and not is_other_file(p, o.signature)
+                      and _header_shape(p, o.signature[0]) is not None), None)
+        if other is None:
+            continue
+        if os.path.exists(own(other)):          # a second copy: its prefs go to the one under the right name, and
+            if is_other_file(own(other), other.signature):     # this model's download replaces it
+                continue
+            log(f"  [moved] {os.path.basename(p)} holds {other.label}'s file: its rows now use "
+                f"{os.path.basename(own(other))}")
+        else:
+            try:
+                os.replace(p, own(other))
+            except OSError:
+                continue
+            log(f"  [moved] {os.path.basename(p)} -> {os.path.basename(own(other))}: it is {other.label}'s file")
+        for k, v in list(prefs.items()):
+            if isinstance(v, str) and v.strip() and same(where(v), p):
+                prefs[k] = own(other)
+        changed = True
+    for f in files:                           # a pref on another model's file
+        p = where(prefs.get(f.pref_key))
+        if not (p and os.path.isfile(p) and is_other_file(p, f.signature)):
+            continue
+        cands = [own(f)] + [where(prefs.get(o.pref_key)) for o in files if o.signature == f.signature]
+        good = next((c for c in cands if c and os.path.isfile(c) and not is_other_file(c, f.signature)
+                     and _header_shape(c, f.signature[0]) is not None), "")
+        prefs[f.pref_key] = good
+        log(f"  [fixed] {f.pref_key} pointed at another model's file ({os.path.basename(p)}): "
+            + (f"now {os.path.basename(good)}" if good else "cleared, so Download models for me fetches it"))
+        changed = True
+    return changed
+
+
 def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None, repo_dir=None):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
     # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
@@ -611,6 +693,8 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
         os.makedirs(models_dir, exist_ok=True)
     prefs = _load_prefs(prefs_file)
     prefs_before = dict(prefs)
+    if not dry_run:
+        repair_links(prefs, models_dir, log=log)
     log(f"[prefs] Using {prefs_file}")
 
     planned = [_chosen(w, choices) for fam in families if fam in FAMILIES for w in FAMILIES[fam]

@@ -65,6 +65,18 @@ def test_invalid_rule_configuration_is_rejected(bad):
         normalized_saved_rules(bad)
 
 
+def _caption_test_state(monkeypatch, text):
+    """Exercise the generic worker with an isolated captioner stub (no model download)."""
+    from types import SimpleNamespace
+    from fizgig.captioners import CaptionResult
+    from fizgig.scripts import batch_caption
+
+    monkeypatch.setattr(batch_caption, "picture", lambda _path: None)
+    desc = SimpleNamespace(instruction=True, default_task="caption")
+    captioner = SimpleNamespace(caption=lambda _image, _request: CaptionResult(text=text))
+    return batch_caption.CaptionState(desc, captioner, False)
+
+
 def test_worker_applies_rules_before_new_caption_write(tmp_path, monkeypatch):
     from fizgig.scripts import batch_caption
     photo = tmp_path / "photo.jpg"
@@ -73,11 +85,11 @@ def test_worker_applies_rules_before_new_caption_write(tmp_path, monkeypatch):
     listing.write_text(str(photo) + "\n")
     instr = tmp_path / "instruction.txt"
     instr.write_text("Describe this image")
-    monkeypatch.setattr(batch_caption, "_caption_qwen",
-                        lambda *_args, **_kwargs: "A BOY stands near a boyfriend.")
-    state = batch_caption.CaptionState("qwen", "cpu", object(), False)
+    state = _caption_test_state(monkeypatch, "A BOY stands near a boyfriend.")
     job = {"list_file": str(listing), "instruction_file": str(instr), "trigger": "hannah",
            "replacement_rules": [{"find": "boy", "replace": "girl",
+                                  "whole_word": True, "enabled": True},
+                                 {"find": "hannah", "replace": "wrong-trigger",
                                   "whole_word": True, "enabled": True}]}
     assert not batch_caption._run_job(state, job)
     assert (tmp_path / "photo.txt").read_text() == "hannah, A girl stands near a boyfriend."
@@ -85,16 +97,18 @@ def test_worker_applies_rules_before_new_caption_write(tmp_path, monkeypatch):
 
 def test_worker_can_use_new_rules_with_cached_model_on_next_job(tmp_path, monkeypatch):
     from fizgig.scripts import batch_caption
-    photo = tmp_path / "photo.jpg"; photo.write_bytes(b"fake")
-    listing = tmp_path / "images.txt"; listing.write_text(str(photo) + "\n")
-    instr = tmp_path / "instruction.txt"; instr.write_text("Describe")
-    monkeypatch.setattr(batch_caption, "_caption_qwen", lambda *_args, **_kwargs: "a boy")
-    state = batch_caption.CaptionState("qwen", "cpu", object(), False)
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"fake")
+    listing = tmp_path / "images.txt"
+    listing.write_text(str(photo) + "\n")
+    instr = tmp_path / "instruction.txt"
+    instr.write_text("Describe")
+    state = _caption_test_state(monkeypatch, "a boy")
     job = {"list_file": str(listing), "instruction_file": str(instr)}
-    batch_caption._run_job(state, job)
+    assert not batch_caption._run_job(state, job)
     assert (tmp_path / "photo.txt").read_text() == "a boy"
     job["replacement_rules"] = [{"find": "boy", "replace": "girl"}]
-    batch_caption._run_job(state, job)
+    assert not batch_caption._run_job(state, job)
     assert (tmp_path / "photo.txt").read_text() == "a girl"
 
 

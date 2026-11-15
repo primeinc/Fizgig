@@ -142,7 +142,7 @@ MOSS_IMAGE = FamilyDescription(
         # Download models for me
         ModelFile("moss_image_sft_look_lora", "SFT look LoRA", False, _LOOK,
                   "moss_image_sft_look_lora.safetensors", 2.07, role="look_lora", fetch_optional=False,
-                  fetch_on_use=True,
+                  fetch_on_use=True, bulk_fetch=False,
                   hint="Optional. Fizgig's SFT look LoRA: previews on your Base get much of SFT's look without "
                        "loading SFT, so they're much quicker. Downloaded for you the first time you tick \"Give "
                        "Base previews the SFT look\" on the Samples tab. Previews only, never training.",
