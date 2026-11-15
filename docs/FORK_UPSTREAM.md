@@ -37,6 +37,8 @@ This is a maintenance contract and runbook, not a second model registry.
 ```bash
 python -m compileall -q src
 python checks/js_parse_gate.py
+# The CI workflow first fetches canonical upstream master into FETCH_HEAD.
+python checks/upstream_signature_gate.py --upstream-ref FETCH_HEAD
 python -m pytest checks -q
 ```
 
@@ -45,5 +47,7 @@ python -m pytest checks -q
 ## Closure boundary
 
 Green CPU tests do not prove GPU-backed inference, caption model downloads, on-device training, or visual correctness. Those capabilities require explicit hardware-backed acceptance separately. An upstream release should not be described as completely supported until the claimed hardware behaviors are actually tested.
+
+The upstream callable gate uses the *actual fetched upstream Git tree* and Python AST to detect lost functions, methods and keyword parameters in common source files. It specifically detects the dropped `train_family(training_maps=...)` regression discovered after PR #15. The gate has negative tests and fails if newer upstream entrypoints have not yet been incorporated.
 
 Upstream updates may still require a domain decision when upstream and the fork intentionally implement different behaviors. The automated sync removes routine manual replay, not the need to resolve genuine semantic conflicts.
