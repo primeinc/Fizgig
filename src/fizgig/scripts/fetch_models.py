@@ -379,6 +379,20 @@ def _configured_file(value, repo_dir=None):
     return os.path.abspath(path) if os.path.isfile(path) else ""
 
 
+def _superseded_selection(w, value):
+    """The upstream build selector/replaces contract, based on *declared* model metadata.
+
+    An explicit build choice must replace a file whose name matches the other
+    build. Retired upstream filenames similarly must not block the new target.
+    A user-picked file with any other name remains authoritative.
+    """
+    name = os.path.basename(str(value or "").strip())
+    return bool(name and (
+        (getattr(w, "switch_from", "") and name == w.switch_from)
+        or name in getattr(w, "replaces", ())
+    ))
+
+
 def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alternates=False):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
@@ -386,7 +400,7 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alte
     the previous file must not suppress the newly chosen build.
     """
     current = _configured_file(prefs.get(w.pref_key), repo_dir)
-    if current:
+    if current and not _superseded_selection(w, current):
         return current
     other_key = getattr(w, "same_as", "")
     other = str(prefs.get(other_key) or "").strip() if other_key else ""
@@ -511,10 +525,15 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
     # bf16, Klein's fp8mixed text encoder instead of the full one, a community fine-tune — and
     # every one of those would have been "too small", silently re-downloaded, and the user's
     # path overwritten with ours.
-    current = _configured_file(prefs.get(w.pref_key), repo_dir)
-    if current:
+    selected_path = str(prefs.get(w.pref_key) or "").strip()
+    current = _configured_file(selected_path, repo_dir)
+    superseded = _superseded_selection(w, selected_path)
+    if current and not superseded:
         log(f"  [keep] {w.pref_key} -> {current} (existing configured model; no download)")
         return True
+    if current and superseded:
+        log(f"  [pick] {w.pref_key}: {os.path.basename(current)} -> {w.filename} "
+            "(build choice or upstream replacement)")
 
     # the same file set for another model (any name: the user's own copy, e.g. ComfyUI's renamed VAE): linked, not fetched
     same_as = getattr(w, "same_as", "")
@@ -538,7 +557,7 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
     # discovery found nothing, do not silently turn it into a multi-GB download.
     # Clearing that row explicitly is how the user authorises a fresh download.
     configured = str(prefs.get(w.pref_key) or "").strip()
-    if configured:
+    if configured and not superseded:
         log(f"  [stale] {w.pref_key}: saved file not found: {configured}")
         log("          Searched your saved model directories and caches; no match. "
             "Correct or clear the Preferences path before downloading.")
