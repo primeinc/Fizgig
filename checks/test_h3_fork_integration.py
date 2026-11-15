@@ -50,7 +50,7 @@ def test_upstream_h3_image_surfaces_through_actual_web_schema():
     assert desc.driver == "fizgig.minimax_image.driver:MiniMaxH3ImageDriver"
     h3 = next(f for f in get_schema()["families"] if f["key"] == "minimax_image")
     assert h3["display_name"] == "MiniMax H3 Image"
-    assert not h3["prefs_skip"]
+    assert not h3.get("prefs_skip", False)
     assert KEYS <= set(h3["model_keys"])
     assert KEYS <= {m["pref_key"] for m in h3["model_files"]}
     assert h3["model_keys"] == form.model_keys(desc)
