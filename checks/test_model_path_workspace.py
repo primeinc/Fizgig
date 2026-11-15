@@ -28,7 +28,8 @@ def test_fork_assets_are_explicitly_served_and_included_in_page():
     """The browser must receive the extension before app.js evaluates boot()."""
     html = (ROOT / "src/fizgig/web/static/index.html").read_text(encoding="utf-8")
     server = (ROOT / "src/fizgig/web/server.py").read_text(encoding="utf-8")
-    assert html.index("/fork-model-library.js") < html.index('src="/app.js"')
-    assert html.index("/style.css") < html.index("/fork-model-library.css")
-    assert server.count('"/fork-model-library.js"') == 1
-    assert server.count('"/fork-model-library.css"') == 1
+    assert html.index("/fork/model-library.js") < html.index('src="/app.js"')
+    assert html.index("/style.css") < html.index("/fork/model-library.css")
+    assert 'path.startswith("/fork/")' in server
+    assert 're.fullmatch' in server
+    assert 'name.endswith(".js")' in server

@@ -8,7 +8,7 @@ const vm = require("node:vm");
 
 const h3 = JSON.parse(fs.readFileSync(0, "utf8"));
 const app = fs.readFileSync("src/fizgig/web/static/app.js", "utf8");
-const extension = fs.readFileSync("src/fizgig/web/static/fork-model-library.js", "utf8");
+const extension = fs.readFileSync("src/fizgig/web/static/fork/model-library.js", "utf8");
 const start = app.indexOf("// ---- Preferences: every family's model files");
 const end = app.indexOf("// Preferences' Captioning models card", start);
 assert(start >= 0 && end > start, "Cannot find the upstream Preferences renderer seam");

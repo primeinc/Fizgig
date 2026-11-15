@@ -3260,9 +3260,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8", extra=extra)
         if path == "/welcome.mp4":                  # the welcome popup's tour (it ships with Fizgig: no network)
             return self._stream(os.path.join(STATIC_DIR, "welcome_v8.mp4"), attachment=False)  # ranged: it seeks
-        if path in ("/app.js", "/style.css", "/qrcode.js", "/fork-model-library.js", "/fork-model-library.css"):
+        if path in ("/app.js", "/style.css", "/qrcode.js"):
             return self._file(os.path.join(STATIC_DIR, path[1:]),
                               "application/javascript; charset=utf-8" if path.endswith(".js") else "text/css")
+        # Fork assets use a constrained namespace so adding files does not modify this upstream handler.
+        if path.startswith("/fork/"):
+            name = path[len("/fork/"):]
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*[.](?:js|css)", name):
+                return self.json({"error": "not found"}, 404)
+            return self._file(os.path.join(STATIC_DIR, "fork", name),
+                              "application/javascript; charset=utf-8" if name.endswith(".js") else "text/css")
         if path == "/icon.png":
             return self._file(os.path.join(STATIC_DIR, "icon.png"))
         if path == "/logo.jpg":
