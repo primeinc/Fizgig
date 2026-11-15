@@ -23,7 +23,8 @@ _STRUCTURE = (
 
 def _preset(rank, epochs, clip_still=True, slider=False, lr=1e-6, optimizer="automagic3"):
     """The old H3 built-ins (lora_trainer_gui.py MINIMAX_BUILT_IN_PRESETS), values unchanged, in the standard layer's
-    keys and this family's option keys; slider=True the Slider preset (adamw8bit, as every slider trains)."""
+    keys and this family's option keys; slider=True the Slider preset (AdamW: full-precision state measured clearly
+    better than AdamW8bit on H3 LoRAs; a rank-8 slider's state is tens of MB, 6 Nov 2026)."""
     return {
         "NETWORK_DIM": rank, "NETWORK_ALPHA": rank, "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": lr, "MAX_TRAIN_EPOCHS": epochs, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
@@ -35,7 +36,7 @@ def _preset(rank, epochs, clip_still=True, slider=False, lr=1e-6, optimizer="aut
         "H3_ADAPTER_RAMP": "Off", "H3_CAPTION_DROPOUT": "0.05 (default)", "H3_STRUCTURE": _STRUCTURE[0][0],
         "H3_LOWNOISE_PCT": "60", "H3_HIGHNOISE_LR_PCT": "100",
         "H3_BLOCKS": "all", "H3_TRAIN_REFINER": "", "H3_LIKENESS_MODE": "Default",
-        "H3_ADAPTER": "Circlestone — best for photos", "H3_TREAD": "1", "H3_CLIP_STILL": "1" if clip_still else "",
+        "H3_TREAD": "1", "H3_CLIP_STILL": "1" if clip_still else "",
         "H3_DISTILL": "",
     }
 
@@ -47,7 +48,7 @@ PRESETS = (
     # Slider (3 Oct): rank 8 (Peter) at 2e-4 for ~160 steps; a prompt smile slider at push 2
     # was clear by epoch 5 of 10 (16 practice pictures an epoch)
     ("✨ MiniMax H3 Slider (rank 8, 2e-4)", _preset(8, 16, clip_still=False, slider=True, lr=2e-4,
-                                                     optimizer="adamw8bit")),
+                                                     optimizer="adamw")),
 )
 
 OPTIONS = (
@@ -60,6 +61,10 @@ OPTIONS = (
                  choice_values=tuple(c[2] for c in _STRUCTURE), choice_notes=tuple((c[0], c[3]) for c in _STRUCTURE),
                  setting="MINIMAX_LOWNOISE_PCT", hint_indent=7, pady=(8, 2), width=36),
     FamilyOption("H3_LOWNOISE_PCT", "Clean-end share", kind="entry", tokens="lownoise_pct={}", default="60", width=8, suffix="% of steps",
+                 hint="How much of training goes to nearly clean pictures (the less noisy half of the steps), where "
+                      "skin, eyes and fine detail are made. The rest goes to the noisier half, which sets movement, "
+                      "pose and layout. Higher: more detail and likeness. Lower: more movement and composition. "
+                      "Fizgig's presets use 60; MiniMax H3's own default is 8, weighted to movement.",
                  summary="low-noise {}%", setting="MINIMAX_LOWNOISE_PCT", requires="H3_STRUCTURE=Custom", pady=(2, 2)),
     FamilyOption("H3_HIGHNOISE_LR_PCT", "Medium to High Noise LR", kind="entry",
                  tokens="highnoise_lr_pct={}", default="100",
@@ -91,15 +96,9 @@ OPTIONS = (
             ("Off · hand-pick the blocks in Other Options", "The blocks are yours to pick, for experiments: Blocks to Train, in the Other Options section "
                                                    "further down this tab.")),
         summary="mode {}", setting="MINIMAX_LIKENESS_MODE", section="after", width=34, pady=(8, 2)),
-    FamilyOption("H3_ADAPTER", "Training adapter", choices=(
-        ("Circlestone — best for photos", "--training_adapter=pref:minimax_circlestone_adapter"),
-        ("Ostris — best for videos", f"--training_adapter={_OSTRIS}"),
-        ("Off", "")),
-        hint="De-distills the base while your LoRA learns: frozen at 1.0 for every training step, off for previews "
-             "and never in your saved file. Circlestone (one file for fl2va and ref2va) trains sharper LoRAs from "
-             "photos; Ostris learns a video look faster. For mixed datasets, choose by whether the photos or the videos are "
-             "the priority.",
-        setting="MINIMAX_ADAPTER", section="after", compact=True, width=46),
+    # the training adapter, always on, no control (Peter, 12 Nov 2026): Ostris's fl2va file on the fl2va base, his ref2va
+    # file on ref2va or a distillation run. It de-distills the base while the LoRA learns; off for previews, never saved.
+    FamilyOption("H3_ADAPTER", "", kind="fixed", tokens=f"--training_adapter={_OSTRIS}"),
     FamilyOption("H3_TREAD", "TREAD token routing — on clip steps, half the video tokens skip the middle blocks",
                  kind="check", tokens="tread=0.5@2-47", default="1",
                  hint="Faster clip steps: a random half of each clip's video tokens skips blocks 2-46 and rejoins "
@@ -137,7 +136,8 @@ OPTIONS = (
                  tokens="distill=1 aux:distill=1 --dit=pref:minimax_ref_dit",
                  hint="Experiment. Teaches the LoRA to reproduce identity the way H3 does from a reference photo. "
                       "Needs the ref2va model in Preferences.", summary="distill", setting="MINIMAX_DISTILL", section="other",
-                 isolation_off=True),     # the side-by-sides' block would hand two-person pictures in as references
+                 isolation_off=True,      # the side-by-sides' block would hand two-person pictures in as references
+                 batch_off=True),         # its teacher step is one picture's own reference sequence
     FamilyOption("H3_DISTILL_WEIGHT", "   teacher ", kind="entry", inline=True, always_shown=True, width=5,
                  suggestions=("0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"), tokens="distill_weight={}", default="0.8",
                  requires="H3_DISTILL", summary="teacher {}", setting="MINIMAX_DISTILL_WEIGHT", section="other"),
@@ -243,31 +243,22 @@ MINIMAX = FamilyDescription(
                        "saved LoRA never contains it. Steps and strength are adjustable on the Samples tab.",
                   download_note="~780MB — larryvrh/MiniMax-H3-Turbo-Lora → minimax_h3_turbo_v4_step600.safetensors "
                                 "(you may already have it in ComfyUI's loras folder)"),
-        ModelFile("minimax_circlestone_adapter", "Training adapter (Circlestone)", False,
-                  "circlestone-labs/MiniMax-H3-Image-Training-Adapter", "minimax_h3_image_training_adapter.safetensors",
-                  0.62, role="training_adapter", fetch_optional=False,
-                  announce="Training adapter (Circlestone, ~620 MB) — sharper, higher likeness",
-                  hint="NEEDED when the Training adapter dropdown says Circlestone (the default) — one file for both "
-                       "bases (fl2va and ref2va). A frozen LoRA that de-distills the base while yours learns: sharper "
-                       "eyes, cleaner skin and better prompt-following than Ostris's on any dataset with stills. On for "
-                       "every training step, off for previews, never in your saved LoRA. The updater fetches it; so "
-                       "does the download button below.",
-                  download_note="~620MB — circlestone-labs/MiniMax-H3-Image-Training-Adapter → "
-                                "minimax_h3_image_training_adapter.safetensors"),
-        ModelFile("minimax_training_adapter", "Training adapter (Ostris fl2va)", False,
-                  "ostris/minimax_h3_training_adapter", "minimax_h3_training_adapter_v1.safetensors", 0.16,
+        ModelFile("minimax_training_adapter", "Training adapter (fl2va)", False,
+                  "ostris/minimax_h3_training_adapter", "minimax_h3_training_adapter_v3.safetensors", 0.31,
+                  role="training_adapter", fetch_optional=False,
+                  announce="Training adapter (Ostris, ~310 MB) — de-distills the base while your LoRA learns",
+                  hint="NEEDED for runs on the standard fl2va base. "
+                       "Ostris's frozen LoRA that de-distills the base while yours learns: on for every training step, "
+                       "off for previews, never in your saved LoRA. The updater fetches it; so does the download "
+                       "button below.",
+                  download_note="~310MB — ostris/minimax_h3_training_adapter → minimax_h3_training_adapter_v3.safetensors"),
+        ModelFile("minimax_ref_training_adapter", "Training adapter (ref2va)", False,
+                  "ostris/minimax_h3_training_adapter", "minimax_h3_ref2va_training_adapter_v3.safetensors", 0.31,
                   fetch_optional=False,
-                  hint="OPTIONAL — Ostris's adapter for the standard fl2va base, used when the Training tab's adapter "
-                       "dropdown says Ostris: it learns a video look faster than Circlestone when the dataset is clips "
-                       "only.",
-                  download_note="~155MB — ostris/minimax_h3_training_adapter → minimax_h3_training_adapter_v1.safetensors"),
-        ModelFile("minimax_ref_training_adapter", "Training adapter (Ostris ref2va)", False,
-                  "ostris/minimax_h3_training_adapter", "minimax_h3_ref2va_training_adapter_v1.safetensors", 0.16,
-                  fetch_optional=False,
-                  hint="OPTIONAL — Ostris's adapter for the Reference (ref2va) base: picked automatically when the "
-                       "dropdown says Ostris and the Training Base is ref2va or the run is a distillation run.",
-                  download_note="~155MB — ostris/minimax_h3_training_adapter → "
-                                "minimax_h3_ref2va_training_adapter_v1.safetensors"),
+                  hint="Ostris's adapter for the Reference (ref2va) base: used instead of the fl2va one when the "
+                       "Training Base is ref2va or the run is a distillation run.",
+                  download_note="~310MB — ostris/minimax_h3_training_adapter → "
+                                "minimax_h3_ref2va_training_adapter_v3.safetensors"),
     ),
     prefs_title="Model Paths (MiniMax H3)",
     prefs_intro="Image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the pruned int8 DiT — the same file "
@@ -275,7 +266,7 @@ MINIMAX = FamilyDescription(
                 "encoder and the video VAE are only needed for the one-time caching pass; the compact nvfp4 TE is "
                 "recommended. Trains on stills, or on short video clips — and with the audio VAE set, on their sound "
                 "too.",
-    fetch_note="Fetches the DiT, text encoder, both VAEs, the Turbo LoRA and the three training adapters above, plus "
+    fetch_note="Fetches the DiT, text encoder, both VAEs, the Turbo LoRA and the two training adapters above, plus "
                "the Krea 2 Qwen3-VL captioning text encoder (~47 GB all in), and fills in these paths for you — plus "
                "the small helper models (Florence-2 captioner, face model for the Look Filter and likeness scoring, "
                "EN→ZH translator, Gizmo's Whisper transcriber — ~1.9 GB) so nothing stalls to download later and "
@@ -316,10 +307,29 @@ MINIMAX = FamilyDescription(
     detail_crops=False,                      # clips: a crop of a frame isn't a clip
     multi_concept_hint="See the MiniMax section of the README.",
     int8_attention=True,              # workbench renders: comfy-kitchen's INT8 attention
-    activation_cache=True,            # Turbo Preview: step-1 replay, identical to a full render
+    activation_cache=True,            # Reuse unchanged blocks: step-1 replay, identical to a full render
     adaptive_lr=False,
+    not_offered={
+        "adaptive_lr": "retired for H3 by decision (its LR is set by the adapter ramp)",
+        "loss_watch": "off for H3 by decision (CLAUDE.md, Per-Image Loss Watch)",
+        "training_maps": "clips: the maps draw on a still's latent grid (a clip's frames would need their own view)",
+        "caption_dropout": "H3 has its own caption dropout option (H3_CAPTION_DROPOUT), not the shared row",
+        "detail_crops": "a crop of a clip's frame isn't a clip",
+        "resolution_stages": "clips train at their own size: not measured with stages",
+    },
     slider_training=True,             # prompt pairs, photo pairs and clip pairs (driver: _slider_loss / predict)
     loss_watch=False,
+    training_maps=False,
+    lora_regularisation=False,        # clips: the regularisation dataset is for still-picture LoRAs
+    batch_training=True,              # Batch size (Other Options): pictures packed (forward_packed); clips one a step
+    own_plan=True,                    # the old trainer's planner (driver.plan_run): its own figures, not train_memory
+    batch_gb=(0.2, 0.8),              # GB each extra picture takes: fixed, per MP (batch 2 vs 3: batch 1 runs without checkpointing)
+    # Batch x checkpointing sweep, 6 Nov 2026 (RTX PRO 6000, 8 pictures, 2 epochs, uncompiled, previews off - so the
+    # no-checkpointing peaks below are the larger of that run's and train_memory's preview peak; uncompiled sits
+    # above a compiled run, the safe side). Desktop\Fizgig batch tests\bsgc\MORNING_REPORT.md
+    batch_auto=((0.25, 4), (1.0, 4)),          # 2.7x / 1.8x a picture over batch 1 (pictures; clips stay 1)
+    batch_gb_nogc=((0.25, 2.4), (1.0, 5.9)),
+    masked_training=True,             # photos only: the dataset gives a mask to a still, never to a clip or a voice
     network_hint="LoRA recommended for MiniMax",
     ema_hint="A smoothed average of the weights, leading to better and more reliable previews.",
     samples_turbo_pace=True,
@@ -378,7 +388,7 @@ MINIMAX = FamilyDescription(
     ema_default="0.98",               # the old H3 default (v5.4.1)
     ema_short_run=True,
     resumes_untagged_states=True,     # an old H3 pause: same files, same parameter order (blocks, qkv/out/fc1/fc2)
-    # the training adapter is the MINIMAX_ADAPTER option (Circlestone / Ostris per base / Off), not the generic tick
+    # the training adapter is the fixed H3_ADAPTER option (Ostris's, per base), not the generic tick
     # the checkpoint's own int8 ConvRot codes, or a 4-bit base (NF4, HQQ); Auto is the driver's plan_run (the old
     # planner), which streams blocks H2D rather than giving up the int8 base
     precisions=("int8", "nf4", "hqq"),

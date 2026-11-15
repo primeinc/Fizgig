@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 from fizgig.dataset.masks import is_mask_file, mask_for_stem
 from fizgig.families import form, launch
 from fizgig.families.registry import get as get_family, training_families
-from fizgig.web import captions, history
+from fizgig.web import captions, history, oom
 from fizgig.web import queue as webqueue
 from fizgig.web import prep_jobs
 from fizgig.families import refmod
@@ -128,6 +128,15 @@ def _amd_gpu_row():
         return None
 
 
+def _has_nvidia():
+    """An NVIDIA card on this machine (nvidia-smi lists one; ROCm's AMD fallback rows don't count)."""
+    try:
+        return any("nvidia" in str(g.get("name") or "").lower() or str(g.get("uuid") or "").startswith("GPU-")
+                   for g in list_gpus())
+    except Exception:
+        return False
+
+
 def list_gpus():
     """[{index, name, total_gb, used_gb, uuid}] from nvidia-smi (unchanged). On ROCm launch only, AMD fallback (#188)."""
     try:
@@ -152,6 +161,22 @@ def list_gpus():
         pass
     row = _amd_gpu_row()
     return [row] if row else []
+
+
+_CARD_GB = {}
+
+
+def _card_total_gb(prefs):
+    """The training card's size in GiB (Preferences' cuda_device, else the first), kept 5 minutes - the Training tab
+    asks on every change and the card doesn't change. None when there's no GPU to read."""
+    want = str((prefs or {}).get("cuda_device") or "")
+    hit = _CARD_GB.get(want)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    row = _chosen_gpu(list_gpus(), want)
+    total = row["total_gb"] if row else None
+    _CARD_GB[want] = (time.time(), total)
+    return total
 
 
 def _chosen_gpu(rows, want):
@@ -459,6 +484,19 @@ def update_prefs(changes: dict):
         _write_json(PREFS_FILE, p)
 
 
+def _repair_model_links():
+    """A Preferences row pointing at another model's file (Klein 9B's and Z-Image's VAEs, both once saved as
+    ae.safetensors): moved to the right file, once at start (fetch_models.repair_links). Never stops the start."""
+    try:
+        from fizgig.scripts.fetch_models import repair_links
+        with _lock:
+            p = _read_json(PREFS_FILE)
+            if p and repair_links(p, user_data.MODELS_DIR, log=lambda m: logger.info("[models]%s", m[1:])):
+                _write_json(PREFS_FILE, p)
+    except Exception as e:
+        logger.warning(f"[models] couldn't check the model files' links: {e}")
+
+
 def pref_path(prefs, key) -> str:
     """A Preferences path as the desktop resolves it (a folder inside Fizgig is stored relative)."""
     v = str(prefs.get(key) or "").strip()
@@ -584,6 +622,9 @@ def _studio_samples(desc):
     turbo = v.get("FAMILY_TURBO_STRENGTH")
     if blank(turbo):
         turbo = spd[1] if spd else 0
+    from fizgig.families.form import turbo_ticked_off
+    if turbo_ticked_off(desc, v):                 # the Use the Turbo LoRA tick off (MOSS-Image)
+        turbo = 0
     f = pref_path(load_prefs(), sp.pref_key) if sp is not None and sp.pref_key else ""
     try:
         live = bool(f and os.path.isfile(f) and float(turbo) > 0)
@@ -696,8 +737,17 @@ def _pods_post(what, b):
     raise ValueError("Unknown pods action.")
 
 
+_STUDIO_DL_SETUP = []      # the setup Download tweaked writes into the picture (the page sends it first)
+
+
 def _studio_post(what, b):
     """Repair Studio's actions (fizgig/web/studio.py runs them in its worker)."""
+    if what == "download_setup":
+        data = b.get("data") or {}
+        if not isinstance(data, dict) or not data.get("fizgig_repair_setup"):
+            raise ValueError("Not a setup.")
+        _STUDIO_DL_SETUP[:] = [data]
+        return {"ok": True}
     if what == "setup_save":                 # the whole session in one file, the desktop's format (Save Setup)
         data = b.get("data") or {}
         if not isinstance(data, dict) or not data.get("fizgig_repair_setup"):
@@ -734,6 +784,8 @@ def _studio_post(what, b):
         return {"ok": True}
     if what == "keep":
         return {"path": studio.keep_tweaked()}
+    if what == "map":                        # maps over the Tweaked render (where the LoRA acts, the tweaks, the trigger)
+        return studio.map_request(b.get("state") or {}, b.get("trigger") or "", bool(b.get("blocks")))
     if what == "render":
         return studio.render(b.get("state") or {}, extra={k: b.get(k) for k in ("video", "audio", "keyframes", "ref_mode", "mix")
                                                           if b.get(k) is not None})
@@ -1063,7 +1115,7 @@ _SIZE_KEYS = ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS")
 # are the same), the save schedule (when checkpoints are written) and the learning rate (the run trains on at the
 # new one, logged); the rest trains on as it was
 _RESUME_SAMPLE_KEYS = ("SAMPLE_PROMPT", "SAMPLE_SEED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
-                       "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "SAMPLE_CHECKPOINT",   # + previews on the checkpoint
+                       "SAMPLE_CFG_SCALE", "FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "SAMPLE_CHECKPOINT",
                        "FAMILY_PREVIEW_LOOK",                                              # + the SFT look tick
                        "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_LATER", "SAMPLE_UNTIL_EPOCH", "SAMPLE_EVERY_AFTER",
                        "BLOCKS_SWAP", "SAVE_EVERY_N_EPOCHS", "SAVE_LATER", "SAVE_UNTIL_EPOCH", "SAVE_EVERY_AFTER",
@@ -1404,6 +1456,11 @@ def delete_run(run_id, confirm=False) -> dict:
         os.remove(step_log.loss_path(folder, name))
     except OSError:
         pass
+    for left in (f"likeness_{name}.json", f"style_{name}.json", f"gallery_{name}.owner"):   # its gallery scores
+        try:
+            os.remove(os.path.join(folder, "sample", left))
+        except OSError:
+            pass
     try:                                       # a pause record for this run would offer a Resume that can't work
         side = os.path.join(folder, ".fizgig_paused.json")
         with open(side, encoding="utf-8") as f:
@@ -1430,7 +1487,8 @@ def _record_pause(out_dir):
         fam, values, folder, name = _run["family"], dict(_run["values"]), _run["image_folder"], _run["lora"]
     desc = get_family(fam)
     ft = bool(desc is not None and desc.finetune and form._kind(desc, values) == "finetune")
-    path = launch.latest_ft_checkpoint(out_dir, name) if ft else launch.latest_state(out_dir, name)
+    began = (history.get(_run.get("history_id")) or {}).get("started_at") or 0     # an earlier run's states don't count
+    path = launch.latest_ft_checkpoint(out_dir, name) if ft else launch.latest_state(out_dir, name, began)
     if not path:
         return False
     side = {"mode": "ft" if ft else "state", "state_path": path, "output_name": name,
@@ -1493,7 +1551,7 @@ def _continue_point(rec):
                                                   values.get("FAMILY_FT_ROTATE_EVERY"))
         return {"kind": "ft", "path": path, "done": done, "of": done + left, "key": "FAMILY_FT_ROTATIONS",
                 "unit": "rotation"}
-    path = launch.latest_state(out, name)
+    path = launch.latest_state(out, name, rec.get("started_at") or 0)     # not an earlier run's, same name and folder
     m = re.search(r"-(\d{6})-state$", path)
     if not m:
         return None
@@ -1505,16 +1563,81 @@ def _continue_point(rec):
             "unit": "epoch"}
 
 
-def _oom_note(run_id):
-    """What to do after a run ran out of GPU memory: Continue from its newest save (fresh memory - memory that
-    fragments over hours is the usual cause late in a run), or, with nothing saved yet, a lighter setup."""
-    pt = _continue_point(history.get(run_id))
-    if pt:
-        return (f"\nThe GPU ran out of memory. The run is saved at {pt['unit']} {pt['done']}: press Continue on its "
-                f"card in Runs & outputs to carry on from there, with fresh memory. Closing other programs that use "
-                f"the GPU (a browser, a game) helps too.\n")
-    return ("\nThe GPU ran out of memory before the run saved anything. Try a smaller picture size or more block "
-            "swap (Memory & Precision, on the Training tab), and close other programs that use the GPU.\n")
+OOM_WAIT_S = 15                 # before an automatic retry: the failed process's memory is given back first
+
+
+def _oom_recover(kind, stage_name, plan):
+    """A run ran out of memory (oom.classify's kind): carry it on by itself when web/oom.py says so - a Continue from
+    its newest save, or a fresh restart a step lighter - logged plainly and kept on its record. False when it
+    stops here (the advice and what was tried are in the log); the caller then lets the queue move on."""
+    rid = _run.get("history_id")
+    rec = history.get(rid) or {}
+    tries = [t for t in (rec.get("oom") or []) if isinstance(t, dict)]
+    pt = _continue_point(rec)
+    try:            # only a save this run made: an earlier run with the same name and folder leaves its own behind
+        started = float(rec.get("started_at") or 0)        # the record's first start (a Continue keeps it)
+        if pt and os.path.getmtime(pt["path"]) < started - 5:
+            pt = None
+    except (OSError, TypeError, ValueError):
+        pass
+    desc = get_family(rec.get("family") or "")
+    values = {k: v for k, v in (rec.get("values") or {}).items() if not str(k).startswith("__")}
+    prog = rec.get("progress") or _run.get("progress") or {}
+    step = prog.get("step")
+    try:
+        per_epoch = int(prog.get("total_steps") or 0) // max(1, int(prog.get("total_epochs") or 1))
+    except (TypeError, ValueError):
+        per_epoch = 0
+    finetune = bool(desc is not None and desc.finetune and form._kind(desc, values) == "finetune")
+    done = f"{pt['unit']} {pt['done']}" if pt else ""
+
+    def lighter():
+        try:
+            max_swap = int(desc.load_driver().max_blocks_to_swap() or 0)
+        except Exception:
+            max_swap = 0
+        return oom.step_down(desc, values, plan, max_swap, launch.precision_key,
+                             {**launch.PRECISION_LABELS, **getattr(desc, "precision_labels", {})})
+
+    if stage_name != "Training" or desc is None or rec.get("source") != "web":
+        d = {"do": "stop", "why": ""}            # a cache stage, or a run this server didn't start: advice only
+    else:
+        d = oom.decide(kind, tries, pt is not None, step, per_epoch, finetune, lighter)
+    new_values, change = values, "same settings"
+    if d["do"] != "stop" and d.get("lighter"):
+        new_values, change = lighter()
+        if new_values is None:
+            d = {"do": "stop", "why": f"it can't go lighter ({change})"}
+    if d["do"] == "stop":
+        append_log(oom.summary(tries) + (f"Automatic recovery stopped: {d['why']}.\n" if tries and d["why"] else "")
+                   + oom.advice(kind, pt is not None, done))
+        return False
+    tries.append({"kind": kind, "step": step, "at": time.time(),
+                  "action": f"{'Continue from the newest save' if d['do'] == 'continue' else 'started again'} "
+                            f"({change})"})
+    history.set_field(rid, "oom", tries)
+    append_log(f"\n↻ Out-of-memory recovery ({len(tries)} of {oom.MAX_TRIES}): {d['why']} - "
+               f"{tries[-1]['action']}, in {OOM_WAIT_S} s.\n")
+    t = threading.Timer(OOM_WAIT_S, _oom_go, args=(rid, d["do"], new_values, tries))
+    t.daemon = True
+    t.start()
+    return True
+
+
+def _oom_go(rid, do, values, tries):
+    """The automatic Continue / restart _oom_recover scheduled; a run started meanwhile (Start, the queue) wins, and
+    the queue then carries on."""
+    rec = history.get(rid) or {}
+    if do == "continue":
+        r = _continue_run(rid, queue_ok=False, values=values)
+    else:
+        r = _start(rec.get("family") or "", values, rec.get("image_folder") or "")
+        if isinstance(r, dict) and not r.get("error") and not r.get("problems") and _run.get("history_id"):
+            history.set_field(_run["history_id"], "oom", tries)       # the new record carries the count on
+    if not isinstance(r, dict) or r.get("error") or r.get("problems"):
+        why = (r or {}).get("error") or "; ".join((r or {}).get("problems") or []) if isinstance(r, dict) else str(r)
+        append_log(f"\nOut-of-memory recovery couldn't start the run again: {why}\n")
+        webqueue.on_run_ended("failed", rec.get("lora"), _queue_starter)
 
 
 def _run_form(rec, values=None):
@@ -1580,6 +1703,110 @@ def _continue_run(run_id, more="", queue_ok=True, values=None):
         if not f.get("error"):
             r = {**r, "form": f}
     return r
+
+
+# The run Fizgig was training when it was closed (or stopped, or crashed), offered again at the next start: carry it
+# on, start the next queued run, or clear the queue. STATE_FILE's "interrupted" holds its history id until a choice is
+# made or any run starts
+_startup = {"offer": None}
+
+
+def _startup_offer():
+    """What the page asks at start-up, or None: {id, lora, can_continue, done, of, unit, queued}."""
+    rid = str(load_state().get("interrupted") or "")
+    rec = history.get(rid) if rid else None
+    # a run that came here by a move belongs to the computer it came from, which follows it and brings it home
+    if rec is None or rec.get("result") != "stopped" or (rec.get("values") or {}).get("__moved_in"):
+        if rid:
+            save_state({"interrupted": ""})
+        return None
+    pt = _continue_point(rec)
+    queued = len(webqueue.status()["items"])
+    can = bool(pt and (not pt["of"] or pt["done"] < pt["of"]))
+    if not can and not queued:
+        save_state({"interrupted": ""})
+        return None
+    return {"id": rid, "lora": str(rec.get("lora") or ""), "can_continue": can, "done": pt["done"] if pt else 0,
+            "of": pt["of"] if pt else 0, "unit": pt["unit"] if pt else "epoch", "queued": queued}
+
+
+def _startup_done():
+    _startup["offer"] = None
+    save_state({"interrupted": ""})
+
+
+def startup_choice(choice) -> dict:
+    """The start-up question answered: "continue" (the interrupted run, from its last save; the queue follows it),
+    "queue" (the next queued run starts; the interrupted one stays on Runs & outputs) or "fresh" (the queue emptied)."""
+    offer = _startup["offer"]
+    if not offer:
+        return {"error": "Nothing is waiting to be decided."}
+    if choice == "continue":
+        if not offer.get("can_continue"):
+            return {"error": "That run has no saved state to carry on from."}
+        webqueue.unhold()
+        r = _continue_run(offer["id"], queue_ok=False)
+        if not isinstance(r, dict) or r.get("error") or r.get("problems"):
+            webqueue.hold("The run before couldn't be carried on. Press Start queue to carry on with the next.")
+            return r if isinstance(r, dict) else {"error": "It couldn't be carried on."}
+        _startup_done()
+        return {"ok": True, **{k: v for k, v in r.items() if k == "form"}}
+    if choice == "queue":
+        _startup_done()
+        webqueue.release(_queue_starter)
+        return {"ok": True}
+    if choice == "fresh":
+        for i in list(webqueue.status()["items"]):
+            webqueue.remove(i["id"])
+        _startup_done()
+        return {"ok": True}
+    return {"error": "Not a choice."}
+
+
+def name_taken(values, inputs) -> str:
+    """Why a new run can't take this name ("" = it can): a run of that name already has files in the same output
+    folder - its LoRAs, saved states or previews. Two runs sharing a name share those files, so one would write over
+    the other and Delete run on either would take both's. A run carrying that same run on is not a new one: the
+    Resume Training box, Continue, a fine-tune's continuation. A run that made nothing (it failed before its first
+    save) leaves the name free."""
+    values = values or {}
+    if str(values.get("RESUME_TRAINING") or "").strip() or values.get("__continue") or values.get("FAMILY_FT_CONTINUE"):
+        return ""
+    out, name = str(inputs.get("LORA_OUTPUT_DIR") or ""), str(inputs.get("LORA_NAME") or "")
+    if not out or not name:
+        return ""
+    found = run_outputs(out, name)
+    if not (found["checkpoints"] or found["states"] or found["previews"]):
+        return ""
+    return (f"A run named {name} already has files in {out}. Give this one another LoRA name ({next_run_name(name, out)} "
+            f"is free), or delete that run on Runs & outputs first. To train that run further, use Continue on Runs & "
+            f"outputs.")
+
+
+def next_run_name(name, out_dir=""):
+    """A name for another run of the same thing: name_2, then _3 and on, past every name in use - the run training,
+    the queued runs, the runs in the history, and anything of that name in the output folder (a LoRA, its epochs, its
+    saved states, a folder)."""
+    name = str(name or "").strip() or "my_lora"
+    used = {str(r.get("lora") or "").lower() for r in history.runs()}
+    used |= {str(i.get("lora") or "").lower() for i in webqueue.status()["items"]}
+    with _lock:
+        used.add(str(_run.get("lora") or "").lower())
+    out = str(out_dir or "").strip() or default_output_dir()
+    try:
+        there = [e.lower() for e in os.listdir(out)]
+    except OSError:
+        there = []
+
+    def taken(n):
+        low = n.lower()
+        return low in used or any(e == low or e.startswith(low + ".") or e.startswith(low + "-") for e in there)
+    for _ in range(10000):
+        m = re.fullmatch(r"(.*)_(\d+)", name)
+        name = f"{m.group(1)}_{int(m.group(2)) + 1}" if m else f"{name}_2"
+        if not taken(name):
+            break
+    return name
 
 
 LOG_CLEAR = "\x00clear\n"      # in the log where a run starts: the page's console begins again from there
@@ -1668,6 +1895,8 @@ def _start_one(family_key, values, image_folder, resume, ft_continue, note, mode
         _run.update(state="starting", stage="", lora=inputs["LORA_NAME"], output_dir=out_dir, family=family_key,
                     values=dict(values), image_folder=image_folder, pause=False, resume="", resume_mode="")
     save_state({"last_run": {"family": family_key, "values": values, "image_folder": image_folder}})
+    if _startup["offer"] or load_state().get("interrupted"):
+        _startup_done()                              # a run is starting: the start-up question is answered
     hid = history.start("web", family_key, inputs["LORA_NAME"], out_dir, image_folder, dict(values),
                         resume=bool(resume or ft_continue), carry=carry)
     with _lock:
@@ -1792,10 +2021,10 @@ def _run_stages(stages, out_dir):
             return
         with _lock:
             _run["proc"] = proc
-        oom = False
+        mem = oom.Watch()                       # GPU / system-RAM messages, and the Auto plan the trainer chose
         for line in proc.stdout:
             append_log(line)
-            oom = oom or "out of memory" in line.lower()
+            mem.feed(line)
             try:
                 upd = tracker.consume(line)
             except Exception:
@@ -1825,12 +2054,14 @@ def _run_stages(stages, out_dir):
             webqueue.on_run_ended("stopped", _run.get("lora"), _queue_starter)
             return
         if ret != 0:
-            append_log(f"\n✖ {stage.name} failed (exit code {ret}).\n" + _log_where())
+            kind = oom.classify(ret, mem)
+            what = {"gpu": " - the GPU ran out of memory", "ram": " - system memory (RAM) ran out"}.get(kind, "")
+            append_log(f"\n✖ {stage.name} failed (exit code {ret}){what}.\n" + _log_where())
             with _lock:
                 _run.update(state="failed", proc=None, ended_at=time.time())
             history.end(_run.get("history_id"), "failed", _run.get("progress"))
-            if oom:
-                append_log(_oom_note(_run.get("history_id")))
+            if kind and _oom_recover(kind, stage.name, mem.plan):
+                return                           # it carries on by itself: the queue waits for that run
             webqueue.on_run_ended("failed", _run.get("lora"), _queue_starter)
             return
     paused = ((os.path.exists(os.path.join(out_dir, ".pause_requested")) or _run["pause"])
@@ -1959,6 +2190,8 @@ def preview_labels(mode) -> dict:
         line = words.get("checkpoint" if r.get("checkpoint") else "look" if r.get("look") else "base", "")
         if r.get("turbo") and words.get("turbo"):
             line = (words["turbo"] + " " + line).strip()
+        if r.get("small"):                       # Faster, smaller previews (a card under 20 GB)
+            line = (line + f" Rendered smaller ({r['small']}) to save time, so softer than full size.").strip()
         if r.get("helper"):                      # a helper rendered the round (web/helpers.py)
             line = (line.rstrip(".") + f" · rendered on {r['helper']}" if line else f"Rendered on {r['helper']}")
         if line:
@@ -2161,7 +2394,12 @@ def _thumb(path, size=320):
                 im = upright(im)
                 im.thumbnail((size, size))
                 buf = io.BytesIO()
-                im.convert("RGB").save(buf, "JPEG", quality=82)
+                if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:
+                    im = im.convert("RGBA")
+                    if im.getextrema()[3][0] < 255:
+                        im.save(buf, "PNG")     # see-through: a PNG keeps it (the page puts it on a checkerboard)
+                if not buf.tell():
+                    im.convert("RGB").save(buf, "JPEG", quality=82)
         data = buf.getvalue()
     except Exception:
         return None
@@ -2653,7 +2891,8 @@ def _start_fetch(family, token="", optional=False, choices=None, model_paths=Non
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                             encoding="utf-8", errors="replace", env=env, cwd=BASE_DIR, **kw)
     with _lock:
-        _fetch.update(proc=proc, state="running", family=family, file="", done=0, total=0, lines=[], then_start=None)
+        _fetch.update(proc=proc, state="running", family=family, file="", done=0, total=0, lines=[], then_start=None,
+                      rate=0.0, eta=None, said=-1)
     threading.Thread(target=_fetch_watch, args=(proc,), daemon=True).start()
 
 
@@ -2735,18 +2974,50 @@ def _look_fetch(desc, values, path):
     return state, ((_on_use_gb(look), look.size_gb) if state == "running" else None)
 
 
+def _fmt_left(s):
+    s = int(max(0, s))
+    return f"about {s // 3600} h {s % 3600 // 60} min" if s >= 3600 else \
+        f"about {max(1, round(s / 60))} min" if s >= 90 else f"about {max(1, s)} s"
+
+
+def _fetch_progress(done, total, file, now):
+    """A [progress] line: the file's bytes, its speed (bytes/s since it started) and time left, and - while Start
+    waits on it (#327) - a line in the run's log as each file starts and at every tenth, so the log says what's
+    happening too. Under _lock, so it returns those lines for the caller to log once the lock is let go."""
+    say = []
+    if file != _fetch.get("file") or done < _fetch.get("done", 0):          # a new file
+        _fetch.update(file_t0=now, file_d0=done, rate=0.0, eta=None, said=-1)
+        if _fetch["then_start"] and total:
+            say.append(f"Downloading {file} ({total / 1024 ** 3:.1f} GB)…\n")
+    _fetch.update(done=done, total=total, file=file)
+    took = now - _fetch.get("file_t0", now)
+    if took >= 3 and done > _fetch.get("file_d0", 0):
+        rate = (done - _fetch["file_d0"]) / took
+        _fetch.update(rate=rate, eta=(total - done) / rate if total else None)
+    tenth = int(10 * done / total) if total else -1
+    if _fetch["then_start"] and total and 0 < tenth < 10 and tenth > _fetch.get("said", -1):
+        _fetch["said"] = tenth
+        speed = f", {_fetch['rate'] / 1024 ** 2:.0f} MB/s, {_fmt_left(_fetch['eta'])} left" \
+            if _fetch.get("rate") and _fetch.get("eta") is not None else ""
+        say.append(f"  {file}: {done / 1024 ** 3:.1f} of {total / 1024 ** 3:.1f} GB ({10 * tenth}%){speed}\n")
+    return say
+
+
 def _fetch_watch(proc):
     for line in proc.stdout:
         line = line.rstrip()
         if not line:
             continue
         m = re.match(r"\s*\[progress\] (\d+) (\d+) (.+)$", line)
+        say = []
         with _lock:
             if m:
-                _fetch.update(done=int(m.group(1)), total=int(m.group(2)), file=m.group(3))
+                say = _fetch_progress(int(m.group(1)), int(m.group(2)), m.group(3), time.time())
             else:
                 _fetch["lines"].append(line)
                 del _fetch["lines"][:-200]
+        for text in say:                  # the run's log (append_log takes _lock itself)
+            append_log(text)
     code = proc.wait()
     with _lock:
         if _fetch["state"] == "running":
@@ -3026,6 +3297,10 @@ class Handler(BaseHTTPRequestHandler):
                               "model_download_root": str(p.get("model_download_root") or ""),
                               "cache_dir": str(p.get("cache_dir") or ""),
                               "settings": {k: str(p.get(k) or "") for k in SETTING_PREFS},
+                              "captioning": {"main": pref_path(p, "krea2_text_encoder"),
+                                             "main_ok": bool(pref_path(p, "krea2_text_encoder")
+                                                             and os.path.isfile(pref_path(p, "krea2_text_encoder"))),
+                                             "others": captions.other_captioners()},
                               "captioner": {"path": str(p.get(captions.SECONDARY_PREF) or ""),
                                             "note": secondary_captioner_note(p),
                                             "links": [{"label": lab, "href": f"https://huggingface.co/{r}/blob/main/{f}"}
@@ -3036,6 +3311,13 @@ class Handler(BaseHTTPRequestHandler):
                               "password_on": bool(self.password),
                               "password_saved": bool(str(p.get("web_password") or "").strip()),
                               "welcome_hidden": str(p.get("welcome_v8_hidden") or "") == "1",
+                              # the launch tip to turn off CUDA Sysmem Fallback: Windows with an NVIDIA card (nvidia-smi
+                              # answers), until Don't show this again
+                              "sysmem_tip": sys.platform == "win32" and str(p.get("sysmem_tip_hidden") or "") != "1"
+                              and _has_nvidia(),
+                              "qt_disable_gpu": str(p.get("qt_disable_gpu") or "") == "1",
+                              # the app window's GPU switch: Linux's (Qt WebEngine) and Windows' (WebView2) windows
+                              "qt_gpu_option": sys.platform.startswith("linux") or sys.platform == "win32",
                               "password_env": bool(os.environ.get("FIZGIG_PASSWORD")) or getattr(self, "password_arg", False),
                               "lan_ip": __import__("fizgig.web.port", fromlist=["x"]).lan_ip(),
                               "cuda_device": str(p.get("cuda_device") or ""), "gpus": list_gpus(),
@@ -3106,6 +3388,8 @@ class Handler(BaseHTTPRequestHandler):
                                       "application/octet-stream")
             except (ValueError, OSError) as e:
                 return self.json({"error": str(e)}, 400)
+        if path == "/api/captioners/status":          # Preferences' Other captioning models, while one downloads
+            return self.json({"others": captions.other_captioners()})
         if path == "/api/captions/options":
             p = load_prefs()
             cap = captioner_for(p)
@@ -3122,6 +3406,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json({"builtin": built, "user": [n for n in user_presets(desc) if n not in built]})
         if path == "/api/prompt_sets":           # the Samples tab's saved prompt sets
             return self.json({"sets": prompt_sets()})
+        if path == "/api/runs/next_name":           # the next free name for another run of the same thing (name_2)
+            return self.json({"name": next_run_name((qs.get("name") or [""])[0], (qs.get("dir") or [""])[0])})
         if path == "/api/studio/families":
             return self.json({"families": [{"key": d.key, "name": d.display_name} for d in studio.families()]})
         if path == "/api/studio/layout":
@@ -3159,6 +3445,12 @@ class Handler(BaseHTTPRequestHandler):
             dl = re.sub(r'[\\/:*?"<>|]+', "_", (qs.get("dl") or [""])[0])        # a Save / Download button
             if dl:                                    # the name the page asks for, with the file's own extension
                 dl = os.path.splitext(dl)[0] + os.path.splitext(p)[1]
+            if dl and (qs.get("which") or [""])[0] == "tweaked" and _STUDIO_DL_SETUP:
+                # Download tweaked: the setup on the page when it was pressed, inside the PNG (drop it on Studio)
+                png = studio.png_with_setup(p, _STUDIO_DL_SETUP[0])
+                if png is not None:
+                    return self._send(200, png, "image/png",
+                                      [("Content-Disposition", f"attachment; filename=\"{dl}\"")])
             return self._stream(p, attachment=bool(dl), filename=dl or None, keep=bool((qs.get("gen") or [""])[0]))
         if path == "/api/studio/peaks":             # a song's waveform for the player's strip
             p = studio.image((qs.get("which") or [""])[0], (qs.get("gen") or [""])[0])
@@ -3262,6 +3554,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(d, dict) or not d.get("fizgig_repair_setup"):
                 return self.json({"error": "That file isn't a Studio setup."}, 404)
             return self.json(d)
+        if path == "/api/studio/map":                # the maps over the Tweaked render, once made
+            return self.json(studio.map_status())
         if path == "/api/studio/metrics":            # the pair on screen, measured (and likeness to a reference)
             return self.json(studio.metrics((qs.get("ref") or [""])[0]))
         if path == "/api/studio/epochs":             # the run a LoRA belongs to (the mix's Up to dial)
@@ -3358,6 +3652,7 @@ class Handler(BaseHTTPRequestHandler):
                 key = (os.path.normcase(os.path.abspath(r.get("output_dir") or ".")), (r.get("lora") or "").lower())
                 d = get_family(r.get("family") or "")
                 r["image_loss"] = bool(owners.get(r.get("id")) and d is not None and getattr(d, "loss_watch", False))
+                r["train_maps"] = key not in newest and _maps_has(r.get("output_dir"), r.get("lora"))
                 r["loss_graph"] = key not in newest and os.path.isfile(
                     step_log.loss_path(r.get("output_dir") or "", r.get("lora") or ""))
                 # Continue: the newest run with its name and folder owns its saves (an older one's are overwritten)
@@ -3394,6 +3689,21 @@ class Handler(BaseHTTPRequestHandler):
                               "images": [{**im, "path": pics.get(im["key"], ""), "queued": im["key"] in queued,
                                           "applied": (applied.get(im["key"]) or [{}])[-1].get("epoch")}
                                          for im in res["images"]]})
+        if path == "/api/runs/train_maps":           # one run's training maps (training/train_maps.py), by epoch
+            from fizgig.training import train_maps
+            from fizgig.web import image_loss
+            run = history.get((qs.get("id") or [""])[0])
+            k, t = (qs.get("key") or [None])[0], (qs.get("t") or [None])[0]
+            try:
+                res = train_maps.read(run.get("output_dir"), run.get("lora"), k, t) if run else None
+            except ValueError:
+                return self.json({"error": "bad noise level"}, 400)
+            if res is None:
+                return self.json({"error": "This run has no training maps."}, 404)
+            if k is None:                            # the first ask: the pictures and epochs, no maps yet
+                res["epochs"] = [{"epoch": e["epoch"], "maps": {}} for e in res["epochs"]]
+            return self.json({**res, "live": run.get("result") in ("running", "paused"),
+                              "images": image_loss.image_paths(run, res["keys"])})
         if path == "/api/runs/caption":              # one training image's caption, for the per-image editor
             from fizgig.web import image_loss
             run = history.get((qs.get("id") or [""])[0]) or {}
@@ -3459,7 +3769,10 @@ class Handler(BaseHTTPRequestHandler):
             r["resume"] = r.get("resume") if r["state"] == "paused" else ""
             from fizgig.web import helpers
             r["move"] = helpers.move_status()
+            _bd = get_family(r.get("family") or "")         # Move to...'s batch tick: why a batch can't go (or [])
+            r["move_batch"] = form.batch_blockers(_bd, r.get("values") or {}) if _bd is not None else ["no run"]
             r["web_queue"] = webqueue.status()
+            r["startup"] = _startup["offer"]
             from fizgig.web import pod_stop
             r["pod_stop"] = pod_stop.status()
             r["slider_live"] = _slider_live_status(r) if r["running"] else None
@@ -3472,10 +3785,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._samples((qs.get("dir") or [""])[0], (qs.get("run") or [""])[0])
         if path == "/api/style":                    # the gallery's Style score (resumes the scorer when on)
             from fizgig.web import gallery_style
-            return self.json(gallery_style.state((qs.get("dir") or [""])[0], (qs.get("dataset") or [""])[0]))
+            return self.json(gallery_style.state((qs.get("dir") or [""])[0], (qs.get("run") or [""])[0],
+                                                 (qs.get("dataset") or [""])[0]))
         if path == "/api/likeness":                 # the gallery's likeness scores (resumes the scorer)
             from fizgig.web import gallery_likeness
-            return self.json(gallery_likeness.state((qs.get("dir") or [""])[0], (qs.get("dataset") or [""])[0]))
+            return self.json(gallery_likeness.state((qs.get("dir") or [""])[0], (qs.get("run") or [""])[0],
+                                                    (qs.get("dataset") or [""])[0]))
         if path == "/api/thumb":
             p = (qs.get("path") or [""])[0]
             if os.path.splitext(p)[1].lower() not in _PIC or not os.path.isfile(p):
@@ -3483,7 +3798,8 @@ class Handler(BaseHTTPRequestHandler):
             data = _thumb(p)
             if data is None:
                 return self._stream(p, attachment=False)
-            return self._send(200, data, "image/jpeg", extra=[("Cache-Control", "private, max-age=3600")])
+            return self._send(200, data, "image/png" if data[:4] == b"\x89PNG" else "image/jpeg",
+                              extra=[("Cache-Control", "private, max-age=3600")])
         if path == "/api/media":
             p = (qs.get("path") or [""])[0]
             if os.path.splitext(p)[1].lower() not in MEDIA or not os.path.isfile(p):
@@ -3615,6 +3931,10 @@ class Handler(BaseHTTPRequestHandler):
         if run:
             items = [e for e in items if infos[e.name].get("run") == run]
         out = pair_songs([(e.name, e.path, {"time": e.stat().st_mtime, **infos[e.name]}) for e in items[:1500]])
+        from fizgig.web import stars
+        starred = stars.read(folder)
+        for it in out:
+            it["starred"] = it["name"] in starred
         by_epoch = epoch_prompts(folder, run) if run else {}
         try:
             with open(os.path.join(folder, f".previews_{run}.json"), encoding="utf-8") as f:
@@ -3622,7 +3942,10 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             mode = None
         newest = by_epoch[max(by_epoch, key=int)] if by_epoch else None
+        out_dir = os.path.dirname(folder.rstrip("\\/"))
         return self.json({"items": out[:1000] if run else out[:300], "runs": runs, "epoch_prompts": by_epoch,
+                          # the run's own training folder (its record): its likeness photos and Style score use it
+                          "dataset": history.image_folder_of(run, out_dir) if run else "",
                           "loras": self._epoch_loras(os.path.dirname(folder.rstrip("\\/")), run, infos) if run else {},
                           "preview_mode": mode if isinstance(mode, dict) else None,
                           "preview_labels": preview_labels(mode),
@@ -3662,8 +3985,13 @@ class Handler(BaseHTTPRequestHandler):
                 stats.append((e, st))
         stats.sort(key=lambda x: x[1].st_mtime, reverse=True)
         base = lambda n: (lambda m: m.group(1) if m else n)(_CKPT.match(n[:-len(".safetensors")]))
-        return self.json({"items": [{"name": e.name, "path": e.path, "size": st.st_size, "time": st.st_mtime,
-                                     "kind": _checkpoint_kind(e.path), "run": base(e.name)} for e, st in stats]})
+        out = [{"name": e.name, "path": e.path, "size": st.st_size, "time": st.st_mtime,
+                "kind": _checkpoint_kind(e.path), "run": base(e.name)} for e, st in stats]
+        from fizgig.web import stars                  # a star on the epoch's own preview (stars.starred_checkpoints)
+        starred = stars.starred_checkpoints(folder, out, sample_info)
+        for it in out:
+            it["starred"] = it["name"] in starred
+        return self.json({"items": out})
 
     def _captions(self, folder, ext, family=""):
         from fizgig.dataset import detail_crops
@@ -3734,7 +4062,29 @@ class Handler(BaseHTTPRequestHandler):
                 busy = _run["proc"] is not None and _run["proc"].poll() is None
                 lora = _run.get("lora") or ""
             if path == "/api/app/busy":
-                return self.json({"training": busy, "lora": lora})
+                # for the window's question on quitting: where the run is saved, and what waits behind it
+                saved, of, queued = 0, 0, len(webqueue.status()["items"])
+                if busy:
+                    with _lock:
+                        out, vals, began = _run.get("output_dir") or "", dict(_run.get("values") or {}), \
+                            _run.get("started_at") or 0
+                    rec = history.get(_run.get("history_id")) or {}
+                    fdesc = get_family(_run.get("family") or "")
+                    if fdesc is not None and fdesc.finetune and form._kind(fdesc, vals) == "finetune":
+                        # a fine-tune saves checkpoints, not states: its newest one's epoch
+                        m = re.search(r"-(\d{6})\.safetensors$", launch.latest_ft_checkpoint(out, lora))
+                    else:
+                        m = re.search(r"-(\d{6})-state$", launch.latest_state(out, lora, rec.get("started_at") or began))
+                    saved = int(m.group(1)) if m else 0
+                    try:
+                        of = int(str(vals.get("MAX_TRAIN_EPOCHS") or "0").strip())
+                    except ValueError:
+                        of = 0
+                return self.json({"training": busy, "lora": lora, "saved": saved, "of": of, "queued": queued})
+            if busy:                              # cut off by quitting: offered again at the next start
+                with _lock:
+                    cut = str(_run.get("history_id") or "")
+                save_state({"interrupted": cut})
             return self.json({"stopped": _stop_and_wait()})
         if path == "/api/login":
             if self.headers.get("X-Fizgig-Token") != TOKEN:
@@ -3853,7 +4203,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/helper/share_start":
                     return self.json(helpers.share_start(b))
                 if path == "/api/helpers/move":           # this computer's run: carry on training on a helper
-                    return self.json(helpers.move_start(str(b.get("id") or ""), bool(b.get("now")), b.get("home", True) is not False))
+                    return self.json(helpers.move_start(str(b.get("id") or ""), bool(b.get("now")), b.get("home", True) is not False,
+                                                        bool(b.get("batch"))))
                 if path == "/api/helpers/move_back":      # a run moved to a helper: back here, to carry on training
                     return self.json(helpers.move_back(bool(b.get("now")), bool(b.get("delete"))))
                 if path == "/api/helpers/move_clear":
@@ -3922,12 +4273,32 @@ class Handler(BaseHTTPRequestHandler):
                                 base_file=pref_path(prefs, dit) if dit else "",
                                 checkpoint_path=ckf if ckf and os.path.isfile(ckf) else "",
                                 look_file=bool(lkf and os.path.isfile(lkf)), look_fetch=_look_fetch(desc, vals, lkf))
+                if getattr(desc, "preview_small_card_option", 0):   # Faster, smaller previews: cards under 20 GB
+                    vt = _stats["vram"][1]
+                    if vt and vt / 1e9 >= 20.0 and "FAMILY_PREVIEW_SMALL" not in st["hidden"]:
+                        st["hidden"] = sorted([*st["hidden"], "FAMILY_PREVIEW_SMALL"])
+                    elif (vt and vt / 1e9 < 20.0 and not vals.get("_chosen_FAMILY_PREVIEW_SMALL")
+                          and not vals.get("FAMILY_PREVIEW_SMALL")):
+                        st["force"]["FAMILY_PREVIEW_SMALL"] = True   # on for a card under 20 GB until they choose
                 if st["kind"] in ("standard", "finetune"):     # the Subjects card: what each folder trains as
                     mpn = _multi_person_notes(vals, b.get("image_folder") or "",
                                               multi_person=st["kind"] == "standard" and
                                               bool(vals.get("FAMILY_MULTI_PERSON")))
                     st["placeholders"] = mpn.pop("__placeholders", {})
                     st["notes"].update(mpn)
+                if desc.batch_training and "BATCH_SIZE" not in st["disabled"]:   # what the batch needs on this card
+                    from fizgig.web import batch_plan
+                    with _lock:
+                        busy = _run["proc"] is not None and _run["proc"].poll() is None
+                    bn, bpend = batch_plan.line(desc, vals, gpu_env(dict(os.environ, PYTHONPATH=os.path.join(
+                        BASE_DIR, "src")), prefs), busy=busy,
+                        files=batch_plan.models(desc, lambda k: pref_path(prefs, k)))
+                    if bn:
+                        st["notes"]["BATCH_SIZE"] = bn
+                    st["pending"] = st.get("pending") or bpend
+                    if str(vals.get("BATCH_SIZE") or "").strip().lower() == "auto":   # Auto: what it does on this card
+                        st["notes"]["BATCH_SIZE"] = launch.batch_auto_note(
+                            desc, vals.get("DATASET_MEGAPIXELS") or 1.0, _card_total_gb(prefs))
                 if st["kind"] == "finetune" and desc.finetune:      # the fine-tune card's plan line (the desktop's)
                     from fizgig.web import ft_plan
                     st["notes"]["FAMILY_FT_ROTATIONS"], st["pending"] = ft_plan.line(
@@ -4015,6 +4386,10 @@ class Handler(BaseHTTPRequestHandler):
                 if plan.problems:
                     return self.json({"problems": plan.problems})
                 out_dir, lora = inputs["LORA_OUTPUT_DIR"], inputs["LORA_NAME"]
+                was_cont = bool(editing and ((webqueue.get(editing) or {}).get("values") or {}).get("__continue"))
+                taken = "" if was_cont else name_taken(vals, inputs)
+                if taken:
+                    return self.json({"problems": [taken]})
                 n = webqueue.clashes(out_dir, lora, skip=editing)
                 with _lock:
                     live_clash = (_run["proc"] is not None and _run["proc"].poll() is None
@@ -4063,6 +4438,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/runs/notes":
                 history.set_notes(str(b.get("id") or ""), str(b.get("text") or ""))
                 return self.json({"ok": True})
+            if path == "/api/startup":                  # the start-up question's answer
+                r = startup_choice(str(b.get("choice") or ""))
+                return self.json(r, 400 if r.get("error") else 200)
             if path == "/api/queue/remove":
                 webqueue.remove(str(b.get("id") or ""))
                 return self.json({"ok": True})
@@ -4098,6 +4476,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(r, 400 if r.get("error") else 200)
             if path == "/api/plan":
                 desc, inputs, plan = _plan(b.get("family", ""), b.get("values") or {}, b.get("image_folder") or "")
+                taken = name_taken(b.get("values") or {}, inputs) if desc is not None and not plan.problems else ""
+                if taken:
+                    plan.problems.append(taken)
                 return self.json({"problems": plan.problems, "stages": [{"name": s.name, "cmd": s.cmd}
                                                                          for s in plan.stages],
                                   "dataset_toml": plan.dataset_toml,
@@ -4105,8 +4486,12 @@ class Handler(BaseHTTPRequestHandler):
                                   if desc is not None and not plan.problems else []})
             if path == "/api/start":
                 fam, vals, folder = b.get("family", ""), b.get("values") or {}, b.get("image_folder") or ""
+                _d0, _in0, _p0 = _plan(fam, vals, folder)
+                taken = name_taken(vals, _in0) if _d0 is not None else ""
+                if taken:                        # a name already used in that output folder: never a second run of it
+                    return self.json({"problems": [taken]})
                 if not b.get("anyway"):          # the Start checks first: warnings come back, nothing starts
-                    desc, inputs, plan = _plan(fam, vals, folder)
+                    desc, inputs, plan = _d0, _in0, _p0
                     fetch = desc is not None and _only_downloads(desc, plan.problems)
                     warn = launch.start_checks(desc, inputs, folder) \
                         if desc is not None and (not plan.problems or fetch) else []
@@ -4185,6 +4570,13 @@ class Handler(BaseHTTPRequestHandler):
                     fam = _run["family"]
                 if not out:
                     return self.json({"error": "Nothing is training right now."}, 400)
+                form_now = b.get("form") if isinstance(b.get("form"), dict) else {}
+                if form_now:                     # the run's Samples values as changed: what a look at the run shows
+                    ok_keys = {k: v for k, v in form_now.items()
+                               if str(k).startswith("SAMPLE_") or k in ("FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON",
+                                                                         "FAMILY_PREVIEW_LOOK", "__SAMPLE_LIVE")}
+                    with _lock:
+                        _run["values"] = {**(_run.get("values") or {}), **ok_keys}
                 side = os.path.join(out, ".sample_override.json")
                 prompts = [ln.strip() for ln in str(b.get("prompts") or "").splitlines() if ln.strip()]
                 if not b.get("on") or not prompts:
@@ -4270,7 +4662,8 @@ class Handler(BaseHTTPRequestHandler):
                 render_keys = {f"workbench_render_{d.key}" for d in training_families()
                                if getattr(d, "workbench_render_choice", False)}
                 allowed = {k for d in training_families() for k in form.model_keys(d)} | set(SETTING_PREFS) | {
-                    "input_dataset_dir", "welcome_v8_hidden", captions.SECONDARY_PREF} | render_keys
+                    "input_dataset_dir", "welcome_v8_hidden", "sysmem_tip_hidden", "qt_disable_gpu",
+                    captions.SECONDARY_PREF} | render_keys
                 ch = b.get("changes") or {}
                 ch = {k: v for k, v in ch.items() if k not in render_keys or v in ("checkpoint", "samples")}
                 if b.get("reset"):                      # Reset to defaults: the settings, never the model files
@@ -4278,7 +4671,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                   if k in SETTING_PREFS}}
                 if "inference_int8" in ch:
                     ch["inference_int8"] = "1" if ch["inference_int8"] in (True, "1", 1) else "0"
-                for k in ("lan_discovery", "update_check"):
+                for k in ("lan_discovery", "update_check", "qt_disable_gpu"):
                     if k in ch:
                         ch[k] = "1" if ch[k] in (True, "1", 1) else "0"
                 upd = {k: str(v) for k, v in ch.items() if k in allowed}
@@ -4365,7 +4758,7 @@ class Handler(BaseHTTPRequestHandler):
                 prefs, folder, clips, photos, _ = _caption_args(b)
                 cap = captioner_for(prefs)
                 model = str(b.get("model") or "")
-                _caption_gpu_check(8.0 if model == captions.QWEN_MODEL else 2.5)
+                _caption_gpu_check(captions.need_gb(model))
                 from fizgig.dataset import detail_crops     # the folder's files, or its largest detail crops
                 inside = {os.path.abspath(f) for f in captions.with_crops(folder)}
                 only = [p for p in (b.get("only") or []) if os.path.dirname(os.path.abspath(p)) in inside]
@@ -4472,15 +4865,25 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/style":               # the gallery's Style score on or off for a samples folder
                 from fizgig.web import gallery_style
                 try:
-                    return self.json(gallery_style.switch(str(b.get("dir") or ""), str(b.get("dataset") or ""),
-                                                          bool(b.get("on"))))
+                    return self.json(gallery_style.switch(str(b.get("dir") or ""), str(b.get("run") or ""),
+                                                          str(b.get("dataset") or ""), bool(b.get("on"))))
                 except ValueError as e:
+                    return self.json({"error": str(e)}, 400)
+            if path == "/api/stars":               # star / unstar one preview (web/stars.py)
+                from fizgig.web import stars
+                p = str(b.get("path") or "")
+                if os.path.splitext(p)[1].lower() not in MEDIA or                         os.path.basename(os.path.dirname(os.path.abspath(p))).lower() != "sample":
+                    return self.json({"error": "not a preview"}, 400)
+                try:
+                    return self.json({"starred": stars.toggle(p, bool(b.get("on")))})
+                except (ValueError, OSError) as e:
                     return self.json({"error": str(e)}, 400)
             if path == "/api/likeness":            # three dataset photos to score the samples against; [] clears
                 from fizgig.web import gallery_likeness
                 try:
                     return self.json({"ok": True, "msg": gallery_likeness.start(
-                        str(b.get("dir") or ""), str(b.get("dataset") or ""), b.get("baselines") or [])})
+                        str(b.get("dir") or ""), str(b.get("run") or ""), str(b.get("dataset") or ""),
+                        b.get("baselines") or [])})
                 except ValueError as e:
                     return self.json({"error": str(e)}, 400)
             if path == "/api/masks/sam_fetch":      # SAM 3.1 into the models folder (1.75 GB, once)
@@ -4494,6 +4897,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not where:
                     return self.json({"error": "SAM 3.1 isn't here yet: choose SAM 3.1 on this card and press "
                                                "Download first."}, 400)
+                captions.unload()                   # anything on the GPU frees the caption model first
                 try:
                     png = mask_edit.sam_click(str(b.get("folder") or ""), str(b.get("name") or ""),
                                               float(b.get("x") or 0), float(b.get("y") or 0), where)
@@ -4511,6 +4915,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not where:
                     return self.json({"error": "SAM 3.1 isn't here yet: press Download first."}, 400)
                 include, exclude = sammask.split_words(b.get("include")), sammask.split_words(b.get("exclude"))
+                captions.unload()
                 if not include:
                     return self.json({"error": "Type what the masks should show in Mask these (e.g. person)."}, 400)
                 try:
@@ -4543,11 +4948,13 @@ class Handler(BaseHTTPRequestHandler):
                                                          b.get("padding") or 20, bool(b.get("replace")),
                                                          bool(b.get("crops_only"))))
                     if path == "/api/look/scan":
+                        captions.unload()
                         return self.json(prep_jobs.look_scan(folder, b.get("baselines") or []))
                     if path == "/api/masks/edit/save":
                         from fizgig.web import mask_edit
                         return self.json(mask_edit.save(folder, str(b.get("name") or ""), str(b.get("png") or "")))
                     if path == "/api/masks/make":
+                        captions.unload()
                         sam = None
                         if b.get("sam"):
                             from fizgig.dataset import sammask
@@ -4856,7 +5263,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("A training run is using the GPU. Extract can run when it finishes.")
                 tools.run_finetune(str(b.get("base") or "").strip(), str(b.get("tuned") or "").strip(),
                                    str(b.get("out_dir") or "").strip() or default_output_dir(),
-                                   str(b.get("name") or ""), b.get("ranks") or [])
+                                   str(b.get("name") or ""), b.get("ranks") or [], identity=bool(b.get("identity")))
                 return self.json({"ok": True})
             if path == "/api/extract/run":
                 from fizgig.web import tools
@@ -4869,8 +5276,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not name.lower().endswith(".safetensors"):
                     name += ".safetensors"
                 folder = str(b.get("out_dir") or "").strip() or default_output_dir()
+                captions.unload()                   # LoKR / LoHa sources SVD on the GPU
                 out = tools.run(desc, str(b.get("source") or "").strip(), os.path.join(folder, os.path.basename(name)),
-                                int(b.get("rank") or 4), str(b.get("preset") or ""), [str(x) for x in (b.get("blocks") or [])])
+                                int(b.get("rank") or 4), str(b.get("preset") or ""), [str(x) for x in (b.get("blocks") or [])],
+                                identity=bool(b.get("identity")))
                 return self.json({"ok": True, "output": out})
             if path == "/api/metadata/save":         # the header rewritten, every tensor byte as it was
                 from fizgig.utils.st_meta import write_metadata
@@ -5015,7 +5424,10 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
     _SRV[0] = srv
     if history.close_orphans():                        # a run left "running" by a stopped or crashed server
         logger.info("A run from before was still recorded as running: it is recorded as stopped now")
+        if history.last_orphan[0]:
+            save_state({"interrupted": history.last_orphan[0]})
     webqueue.load()                                    # held if it holds anything: a restart never launches a run
+    _startup["offer"] = _startup_offer()               # the run that was cut off: the page asks what to do
     _restore_pause()                                   # a run paused before the restart can still be resumed
     __import__("fizgig.web.helpers", fromlist=["x"]).ensure_home()   # pods' checkpoints still coming home
     __import__("fizgig.web.helpers", fromlist=["x"]).local_restore()  # this computer's other GPU, as a helper
@@ -5062,6 +5474,11 @@ def run_server(host, port=None, password=None, password_arg=False, open_browser=
             logging.shutdown()
             os._exit(0)
 
+
+
+def _maps_has(output_dir, lora):
+    from fizgig.training import train_maps
+    return train_maps.has_maps(output_dir, lora)
 
 _RESTART = [False]
 _SWITCH = [False]
@@ -5152,6 +5569,7 @@ def main(argv=None):
         from fizgig.web import pod_version
         pod_version.boot()
     user_data.migrate()                       # Fizgig 7's loose files into user_data, before anything reads them
+    _repair_model_links()
     # a pod: its VNC_PASSWORD, the remote desktop's, so one password opens both. Elsewhere VNC_PASSWORD is ignored (a
     # stray one would open the web UI to the network while Preferences says no password).
     saved = str(load_prefs().get("web_password") or "").strip()

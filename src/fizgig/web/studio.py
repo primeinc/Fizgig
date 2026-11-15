@@ -154,14 +154,20 @@ def _event(ev):
         elif kind == "early" and _S.get("rendering"):     # H3's Show early: the tweaked pane's unfinished look
             _S.update(early=ev.get("png", ""), early_gen=ev.get("gen", 0),
                       status=f"Tweaked: pass {ev.get('step')} of {ev.get('n')}, unfinished - rendering the rest…")
+        elif kind == "baseline_ready" and _S.get("rendering"):   # the Baseline, while the Tweaked one renders
+            _S.update(baseline=ev.get("baseline", ""), baseline_media=ev.get("baseline_media", ""),
+                      baseline_gen=ev.get("gen", 0), status="Baseline ready - rendering Tweaked…")
         elif kind == "rendered":
             _S.update(rendering=False, progress=None, baseline=ev.get("baseline", ""), tweaked=ev.get("tweaked", ""),
                       early="",
                       baseline_media=ev.get("baseline_media", ""), tweaked_media=ev.get("tweaked_media", ""),
                       baseline_act=ev.get("baseline_act", ""), tweaked_act=ev.get("tweaked_act", ""),
                       shown=ev.get("gen", 0), status="Ready.", error="", nolora_busy=bool(ev.get("nolora_pending")),
-                      notes=ev.get("notes"))
+                      notes=ev.get("notes"), same=bool(ev.get("same")))
             nxt, _S["pending"] = _S["pending"], None
+        elif kind == "map" and ev.get("rid") == _S.get("map_rid"):    # the newest request's maps (map_request)
+            _S["map"] = {k: v for k, v in ev.items() if k != "ev"}
+            _S["map"]["busy"] = False
         elif kind == "nolora":                   # the No-LoRA pane's render landed (or a newer edit cut it short)
             _S["nolora_busy"] = False
             if ev.get("nolora") and ev["nolora"] != _S.get("nolora"):   # the same file again: the pane plays on
@@ -363,9 +369,43 @@ def render(state, extra=None):
     return {"ok": True, "gen": gen}
 
 
+def lora_trigger(path):
+    """A LoRA's trigger word from its metadata (Fizgig's, kohya's), or ""."""
+    try:
+        from safetensors import safe_open
+        with safe_open(path, framework="pt") as f:
+            md = f.metadata() or {}
+        return (md.get("modelspec.trigger_phrase") or md.get("ss_trigger_word") or "").strip()
+    except Exception:
+        return ""
+
+
+def map_request(state, trigger="", blocks=False):
+    """The maps over the Tweaked render on screen, made in the worker (engine.lora_map); the page polls map_status.
+    No trigger given: the primary LoRA's own, from its metadata."""
+    with _lock:
+        if _S["state"] != "ready":
+            return {"error": "Load a LoRA first."}
+        pic, shown = _S.get("tweaked") or "", _S.get("shown", 0)
+        if not (pic and os.path.isfile(pic)):
+            return {"error": "Render a preview first."}
+        trig = str(trigger or "").strip() or lora_trigger(_S.get("primary") or "")
+        # each request its own number, echoed by the worker: a result is only ever the answer to its own request
+        # (a map asked for while another was being made used to take the earlier one's result)
+        rid = _S["map_rid"] = int(_S.get("map_rid", 0)) + 1
+        _S["map"] = {"gen": shown, "rid": rid, "busy": True, "trigger": trig, "with_blocks": bool(blocks)}
+    _send({"cmd": "map", "gen": shown, "rid": rid, "state": state, "picture": pic, "trigger": trig, "blocks": bool(blocks)})
+    return {"ok": True, "gen": shown, "rid": rid, "trigger": trig}
+
+
+def map_status():
+    with _lock:
+        return dict(_S.get("map") or {})
+
+
 def metrics(ref=""):
     """The desktop's metrics strip for the pair on screen: likeness to a reference photo (the Look Filter's face
-    embedder; with Auto look match decided from the reference - ArcFace for a person, DINOv2 for a furry / anime
+    embedder; with Auto look match decided from the reference - AdaFace for a person, DINOv2 for a furry / anime
     face) and repair_studio.metrics' paired numbers - patch grid, face detail, clipping, saturation. CPU only."""
     import numpy as np
     from PIL import Image
@@ -678,12 +718,14 @@ def status():
         d = {k: _S[k] for k in ("state", "family", "primary", "donor", "primary_blocks", "donor_blocks", "status",
                                 "progress", "shown", "rendering", "error", "saved", "profile")}
         d["notes"] = _S.get("notes")
+        d["same"] = bool(_S.get("same"))           # the Tweaked render on screen is the Baseline
         d["eq"] = _S.get("eq") or {}
         d["media"] = {k: bool(_S.get(k + "_media")) for k in ("baseline", "tweaked", "nolora")}
         d["act"] = {k: bool(_S.get(k + "_act")) for k in ("baseline", "tweaked")}
         d["nolora_gen"], d["nolora_busy"] = _S.get("nolora_gen", 0), bool(_S.get("nolora_busy"))
         d["pending"] = _S["pending"] is not None
         d["early"] = _S.get("early_gen", 0) if _S.get("early") and _S.get("rendering") else 0
+        d["baseline_early"] = _S.get("baseline_gen", 0) if _S.get("rendering") else 0
         d["log"] = _S["log"][-12:]                 # the worker's own lines (the engine's log), for when it goes wrong
     return d
 
@@ -693,6 +735,24 @@ def image(which, gen):
         p = _S.get(which) if which in ("baseline", "tweaked", "nolora", "baseline_media", "tweaked_media",
                                        "nolora_media", "baseline_act", "tweaked_act", "early") else ""
     return p if p and os.path.isfile(p) else ""
+
+
+SETUP_KEY = "fizgig_studio_setup"     # the PNG text chunk Download tweaked writes the setup into
+
+
+def png_with_setup(path, setup):
+    """The PNG at path with Studio's setup (Save setup's JSON) in an iTXt chunk before IEND, so dropping the picture
+    on Studio restores its sliders. The picture's own bytes are untouched. None when it isn't a PNG."""
+    import struct
+    import zlib
+    with open(path, "rb") as f:
+        data = f.read()
+    end = data.rfind(b"IEND") - 4                  # the IEND chunk's length field
+    if not data.startswith(b"\x89PNG\r\n\x1a\n") or end < 8:
+        return None
+    body = SETUP_KEY.encode("latin-1") + b"\0\0\0\0\0" + json.dumps(setup, separators=(",", ":")).encode("utf-8")
+    chunk = struct.pack(">I", len(body)) + b"iTXt" + body + struct.pack(">I", zlib.crc32(b"iTXt" + body) & 0xFFFFFFFF)
+    return data[:end] + chunk + data[end:]
 
 
 _peaks = {}
@@ -732,7 +792,7 @@ CAT_SHORT = {"style_composition": "Style+Comp", "style_ident_overlap": "Style/ID
 KLEIN_PRESETS = {"✨Reset All": None, "✨Identity Only": ["identity", "style_ident_overlap", "ident_details_overlap"],
                  "✨Style+Composition Only": ["style_composition", "style_ident_overlap"],
                  "✨Details Only": ["details", "ident_details_overlap"]}
-STILLS_SIZES = ["256", "384", "512", "640", "768", "1024", "1280", "1536"]   # the Samples tab's + two quick ones
+STILLS_SIZES = ["256", "384", "512", "640", "768", "1024", "1280", "1536", "2048"]   # the Samples tab's + two quick ones
 
 
 def families():
@@ -766,7 +826,35 @@ def plan_video(desc, prefs, pref_path, checkpoint="", base="", refmod=False):
           "turbo_lora_strength": (desc.preview_speed_defaults() or (0, 0.75))[1],
           "te_cache_dir": os.path.join(cache, "te_prompts") if cache else "",
           "audio_vae_path": audio if audio and os.path.exists(audio) else "", "base_mode": base_mode}
+    # Preferences' INT8 fast inference, for a model on the shared video engine (H3's engine has its own Base picker)
+    if _shared_clip_engine(desc) and "int8" in desc.precisions and             str(prefs.get("inference_int8", "")).strip() in ("1", "True", "true"):
+        kw["precision"] = "int8"
+    # the description's fixed family options that name model files (Vimoo's glyph encoder and SigLIP), as the
+    # trainer gets them; an engine that plans its own files (H3's) ignores them
+    fo = {}
+    for opt in desc.options:
+        if opt.kind != "fixed":
+            continue
+        for tok in opt.tokens.split():
+            k, eq, v = tok.partition("=")
+            if not eq or tok.startswith(("aux:", "--")) or not v.startswith("pref:"):
+                continue
+            v = look(v[len("pref:"):])
+            if v and os.path.exists(v):
+                fo[k] = v
+    if fo:
+        kw["family_options"] = fo
     return kw, f"Loading {desc.display_name} (the base takes a minute)…", problems
+
+
+def _shared_clip_engine(desc):
+    """Whether the family's Studio engine is the shared video engine (or built on it): its clip sampling is the one the
+    clip row's note describes (H3's own engine samples its own way)."""
+    try:
+        from fizgig.families.video_workbench import VideoWorkbenchEngine
+        return issubclass(desc.workbench_engine_class(), VideoWorkbenchEngine)
+    except Exception:
+        return False
 
 
 def layout(desc, prefs, pref_path, samples=None):
@@ -784,8 +872,9 @@ def layout(desc, prefs, pref_path, samples=None):
     look = lambda k: pref_path(prefs, k)
     have = lambda k: bool(k and look(k) and os.path.exists(look(k)))
     ck, sp = desc.preview_checkpoint(), desc.preview_speed()
-    fast = (f"{ck[1].name} ({ck[1].steps}-step, default)" if ck is not None and have(ck[0].pref_key) else
-            f"{sp.name} ({sp.settings.steps}-step, default)" if sp is not None and have(sp.pref_key) else "")
+    bare = lambda n: re.sub(r" [(]?[0-9]+-step[)]?$", "", n)     # a name that carries its own step count
+    fast = (f"{bare(ck[1].name)} ({ck[1].steps}-step, default)" if ck is not None and have(ck[0].pref_key) else
+            f"{bare(sp.name)} ({sp.settings.steps}-step, default)" if sp is not None and have(sp.pref_key) else "")
     ds = desc.default_sampling()
     kind = "video" if desc.video_workbench else "audio" if desc.audio_workbench else "stills"
     audio_vae = desc.model_path("audio_vae", look) if kind == "video" else ""
@@ -797,6 +886,18 @@ def layout(desc, prefs, pref_path, samples=None):
                       "scales": [n for n, _ in vc.scales], "scale_of": dict(vc.scales),
                       "models": [c.label for c in vc.checkpoints],
                       "references": {c.label: c.references for c in vc.checkpoints},
+                      "frame_slots": list(getattr(desc.workbench_engine_class(), "keyframe_slots", ("first", "last"))),
+                      # the clip row's own defaults and labels: the confirm regime's steps and speed-LoRA strength,
+                      # the speed LoRA's short name ("Turbo", "Distilled"), and Show early where the engine has it
+                      "steps": next((int(st) for n, st, _tu in (desc.clip_regimes or ()) if n == "confirm"), None),
+                      "speed_strength": next((float(tu) for n, _st, tu in (desc.clip_regimes or ()) if n == "confirm"),
+                                             None),
+                      "speed_label": (desc.preview_speed().name.split(" LoRA")[0].split(" (")[0].split()[-1]
+                                      if desc.preview_speed() is not None else ""),
+                      "show_early": bool(getattr(desc.workbench_engine_class(), "supports_show_early", False)),
+                      "base_steps": desc.default_sampling().steps if desc.default_sampling() else None,
+                      # the clip row's line on what Steps and the speed LoRA give: for the shared video engine's sampling
+                      "clip_note": _shared_clip_engine(desc),
                       "bases": [n for n, _ in vc.bases], "speed_boost": bool(vc.speed_boost),
                       "sound": bool(audio_vae and os.path.exists(audio_vae))} if kind == "video" and vc else None,
             "song_lengths": SONG_LENGTHS if kind == "audio" else None,

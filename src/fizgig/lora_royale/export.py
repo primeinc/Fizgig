@@ -295,7 +295,7 @@ def _score_badge(score) -> Tuple[str, tuple]:
 def build_likeness_frames(ref_image: Image.Image, images: List[Tuple], scores: dict,
                           speed: str = "Normal", pingpong: bool = True, brand: bool = True,
                           max_size: Optional[int] = 768) -> List[Image.Image]:
-    """Side-by-side likeness clip: [ reference | epoch ] with the ArcFace likeness
+    """Side-by-side likeness clip: [ reference | epoch ] with the likeness
     score burned in, morphing epoch-by-epoch like the crossfade — the reference panel
     stays fixed while the epoch panel blends and the score ticks. `scores` maps the
     epoch label to its cosine (NaN / missing → 'NO FACE'). Mirrors build_frames'
@@ -509,7 +509,8 @@ def build_comparison_grid(rows, col_labels, *, row_labels=None, cell=None,
                 continue
             im = row[ci]
             if im.mode != "RGB":
-                im = im.convert("RGB")
+                from fizgig.utils.image import flatten
+                im = flatten(im)
             if im.size != (cw, ch):
                 im = im.resize((cw, ch), Image.LANCZOS)
             sheet.paste(im, (gutter + ci * (cw + gap), y))

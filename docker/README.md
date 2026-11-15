@@ -1,5 +1,7 @@
 # Running Fizgig on a rented GPU
 
+<a href="https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=bdrdew7hxw&ref=vkb387ep"><img src="https://img.shields.io/badge/New%20to%20RunPod%3F-Sign%20up%20with%20Google%20to%20support%20Fizgig-4285F4?style=flat&logo=google&logoColor=white" alt="New to RunPod? Sign up with Google to support Fizgig"></a>
+
 [**⚡ Deploy Fizgig on RunPod →**](https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=bdrdew7hxw&ref=vkb387ep)
 
 > **Before you press Deploy Pod:** RunPod doesn't add a disk for you: on its page press **Add volume**, click **Volume disk** (it opens on Global volume, which doesn't work), keep **300 GB**, press **Add volume disk**, then **Deploy Pod**. [See an explanation with screenshots](#give-it-a-disk-on-runpods-deploy-page).
@@ -217,7 +219,7 @@ Environment variables, set on the deploy screen under **Edit Template**:
 |---|---|---|
 | `FIZGIG_PASSWORD` | your choice (not a very common one) | Fizgig *and* the file manager. Generated on the first start if unset, then kept. (`VNC_PASSWORD`, the classic template's name, works too.) |
 | `HF_TOKEN` | `hf_…` | Only needed for Klein and Flux 3 Image Klein, which are gated. Krea 2 needs nothing. |
-| `FETCH_MODELS` | `krea2`, `klein`, `flux3`, `minimax`, `tools` — comma-separated | Download at boot instead of clicking the button in Preferences. `minimax` includes the Circlestone and both Ostris training adapters. `tools` is the Florence-2 captioner, the EN→ZH translator for bilingual captions, and the face model the Look Filter uses. |
+| `FETCH_MODELS` | `krea2`, `klein`, `flux3`, `minimax`, `tools` — comma-separated | Download at boot instead of clicking the button in Preferences. `minimax` includes both training adapters (fl2va and ref2va). `tools` is the Florence-2 captioner, the EN→ZH translator for bilingual captions, and the face model the Look Filter uses. |
 | `FIZGIG_REF` | branch or tag | Which Fizgig to run. Defaults to `master`: the newest at every start, or your computer's version once your Fizgig has opened the pod. A release's tag (`v8.9.92`) keeps the pod on that version whatever opens it ([Which Fizgig a pod runs](#which-fizgig-a-pod-runs)). |
 
 Nothing is compulsory — the defaults are the intended setup, and everything here can be done from

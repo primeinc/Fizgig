@@ -5,7 +5,7 @@ the module names unchanged: LoRA keys come from named_modules(), and ComfyUI (co
 lora_unet_<path> onto these names, including q_proj / k_proj / v_proj on a file that fuses them into qkv.
 
 Fizgig additions: gradient checkpointing around each block, and a loader that accepts the reference package
-(model.safetensors) or Comfy-Org's single file (diffusion_models/flux3_image_klein*_bf16.safetensors).
+(model.safetensors) or Comfy-Org's single file (diffusion_models/flux3-image-klein*-bf16.safetensors).
 """
 import math
 from dataclasses import dataclass
@@ -17,6 +17,8 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
 
 from fizgig.modules import int8_attention as _i8a
+from fizgig.training import attn_probe
+
 
 MODES = ("image", "image_cond", "text")  # sorted; the order tokens take inside a sample
 IN_CHANNELS = {"image": 128, "image_cond": 128, "text": 20480}
@@ -161,6 +163,8 @@ class Block(nn.Module):
         x_mod = layernorm_modulation(x, scale, shift)
         split = lambda t: t.reshape(1, t.shape[0], self.heads, -1).transpose(1, 2)  # L (H D) -> 1 H L D
         q, k = self.norm(split(self.q_proj(x_mod)), split(self.k_proj(x_mod)), freqs)
+        if attn_probe._ACTIVE is not None:      # training maps: the trigger word's attention (training/attn_probe.py)
+            attn_probe.see(q, k)
         v = split(self.v_proj(x_mod))
         attn = packed_attention(q, k, v.to(q.dtype), bounds)
         gate_in, up = self.mlp_in(x_mod).chunk(2, dim=-1)
@@ -280,6 +284,10 @@ class Flux3DiT(nn.Module):
                     offset += b - a
             bounds.append((start, offset))
         h = torch.cat(chunks)
+        if attn_probe._ACTIVE is not None and packed.num_samples == 1:     # the picture's rows, where the text starts
+            at = {m: (o, o + b - a) for m, a, b, o in placement}
+            if "image" in at and "text" in at:
+                attn_probe.layout(at["image"], at["text"][0], h.shape[0])
         freqs_sm = rope_embed(torch.cat(id_chunks)[None])
         mods = tuple(torch.cat(c) for c in mods)
         blocks = list(self.single_blocks) if self.blocks_to_swap else None

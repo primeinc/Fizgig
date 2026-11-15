@@ -69,6 +69,10 @@ class ModelFile:
     # Turbo's): Download models for me links this row to that file when it is set and on disk, instead of fetching a
     # second copy into the models folder
     same_as: str = ""
+    # (tensor name, shape) that only the right file has, read from its header: a pref pointing at a file holding
+    # another model's (Klein's FLUX.2 VAE and Z-Image's FLUX.1 VAE, both once saved as models/ae.safetensors) is
+    # moved to the right one when Fizgig starts and before a download (fetch_models.repair_links)
+    signature: tuple = ()
 
     @property
     def fetch_is_optional(self) -> bool:
@@ -146,6 +150,10 @@ class LoRAFormat:
     lokr_kohya_stems: bool = False
     note: str = ""
     source: str = ""
+    # True: every LoRA file written for the family (training saves, Save Repaired, Extract) goes through
+    # driver.export_lora_state_dict into the checkpoint's own layout, and a resume reads it back through
+    # convert_lora_state_dict. For a model whose ComfyUI checkpoint fuses Linears the driver trains split.
+    save_fused: bool = False
 
     def module_of(self, key: str) -> Optional[str]:
         """Dotted module path of a down-weight key ('transformer.modulation.1.lora_A.weight' -> 'modulation.1'),
@@ -255,8 +263,11 @@ class FamilyOption:
     show_if_media: str = ""           # shown only when the dataset holds this media kind ("clip", "voice")
     mixed_only: bool = False          # shown only when the dataset mixes voice with photos or clips
     isolation_off: bool = False       # a check that can't run with Fizgig LoRA Isolation: off and greyed while it's on
+    batch_off: bool = False           # a check that reads one picture a step: off and greyed while Batch size is above 1
     requires: str = ""                # shown (and sent) only while this check is ticked ("KEY") or this choice is
     #                                   picked ("KEY=LABEL", matched as pick() matches)
+    advanced: bool = False            # web: drawn inside the row it `requires`, behind that row's Advanced toggle
+    #                                   (closed by default) - a tuned default whose numbers most people leave alone
     suggestions: tuple = ()           # entry: ready-made values offered in an editable dropdown ("6-49 · why")
     mode: str = ""                    # "finetune": shown and sent for a fine-tune only; "lora": for a LoRA only
     # a queued run's one-line summary shows this while the option is away from its default ("{}" = its value;
@@ -272,6 +283,9 @@ class FamilyOption:
     # with the tick ":N", after it the higher value with every Nth epoch at the lower; `slide_hint` replaces the hint
     slide: tuple = ()
     slide_hint: str = ""
+    # (note, value): a bracketed line above the Slide hint naming other known-good numbers, with "click here to try
+    # them", which puts `value` into the boxes. () = none
+    slide_alt: tuple = ()
     single: str = ""                  # Single's value to start with when the default is a Split or Slide value
 
     def choice_labels(self):
@@ -361,6 +375,9 @@ class FamilyDescription:
     prefs_note: str = ""
     fetch_note: str = ""
     fetch_optional_label: str = ""
+    # (label, url): one small link under the family's Download button in Preferences, opening the model's licence in a
+    # new tab. A link only - the licence's text and terms live in the family's guide (docs/drivers/CHECKLIST.md)
+    licence_link: tuple = ()
     # the "new model files" popup's opening line (the files themselves: ModelFile.announce)
     announce_intro: str = ""
 
@@ -425,6 +442,10 @@ class FamilyDescription:
     # breaks rather than degrade quietly.
     compile_payback_steps: dict = field(default_factory=dict)
     compile_boundary: str = "inside"
+    # "inside" only from this PyTorch (e.g. "2.15"): older ones keep the checkpoint outside - MOSS-Image's inside
+    # placement keeps 7-10 full-width activations a block on torch 2.10 against 2 on 2.15 (#324: an install pulled
+    # without updating PyTorch spilled into system RAM). "" = any version.
+    compile_inside_min_torch: str = ""
     compile_fullgraph: bool = True
     # measured peak GB when compiled: {precision: {"inside" | "outside": ((megapixels, GB), ...)}}. With it the compile
     # plan checks free VRAM: the family's boundary if it fits, else the checkpoint outside the graph, else uncompiled.
@@ -448,6 +469,10 @@ class FamilyDescription:
     # Clean-end share differs for a fine-tune and a LoRA
     kind_values: tuple = ()
     ft_regularisation: bool = True    # the fine-tune card offers a regularisation set (photos of the broad class)
+    # the Subjects card's Regularisation dataset (Standard LoRA and LoKR): a folder of ordinary pictures of the same
+    # kind of thing, trained alongside at its own LR multiplier, in place of DOP / Fizgig LoRA Isolation (#332). Off for
+    # the families whose items are clips or songs
+    lora_regularisation: bool = True
     # the Training tab's large-dataset hint: (rate, steps per epoch) - a standard LoRA whose learning rate (or
     # adaptive Min LR) is at least `rate`, on more than `steps` steps an epoch, gets a tip suggesting a cooler rate,
     # so the best point doesn't fall between two saved epochs. None turns the hint off for the family
@@ -481,6 +506,7 @@ class FamilyDescription:
     # LoRA was on). Empty = no line (a family opts in)
     preview_labels: tuple = ()
     preview_look_strength: float = 1.0
+    preview_look_on: bool = False     # the Samples tab's look tick starts ticked
     # the workbench tabs' choice while the Samples tab previews on the training model (its preview-checkpoint tick
     # off): render on the preview checkpoint (the default: what most people generate with) or follow the Samples tab,
     # its preview look LoRA included. One choice per family, kept in prefs (workbench_render_<key>). Needs
@@ -503,6 +529,13 @@ class FamilyDescription:
     # block)}; the peak may instead be ((megapixels, GB), ...) points, interpolated for the run's resolution.
     # {} = Auto just takes the first precision
     train_memory: dict = field(default_factory=dict)
+    own_plan: bool = False            # no train_memory: the driver plans precision + swap itself (plan_run, plan_pictures)
+    # the same figures for a card under 20 GB, where the trainer parks the model for each preview's decode and caps the
+    # preview at 768 px (train._small_card_previews) - so train_memory's big-card preview peak doesn't apply there.
+    # Measured on a small card, or training's own peak without the preview. {} = train_memory everywhere.
+    train_memory_small: dict = field(default_factory=dict)
+    # Auto's precision order on such a card, when it differs from auto_precisions (Vimoo: NF4 first)
+    auto_precisions_small: tuple = ()
     # the same peak with gradient checkpointing OFF, compiled blocks, no swap: {precision: ((megapixels, GB), ...)}.
     # A compiled LoRA run with no swap trains without checkpointing (13-27% faster) when this fits with a margin;
     # a precision missing here (nf4: its dequantised weights stay alive for backward) always checkpoints
@@ -510,6 +543,16 @@ class FamilyDescription:
     # partial checkpointing on a big card where full off doesn't fit: {precision: (blocks, ((megapixels, GB with every
     # block checkpointed, GB per block without it), ...))}, compiled with the checkpoint outside the graph, previews on
     train_memory_partial: dict = field(default_factory=dict)
+    # Batch size Auto, on 40 GB+ cards (quant.NOGC_MIN_CARD_GB): the batch that measured fastest per picture at each
+    # size, ((megapixels, batch), ...) - the first point at or above the run's size counts; past the last, batch 1.
+    # () = the family never batches on Auto (the big DiTs: one picture already fills the GPU)
+    batch_auto: tuple = ()
+    # train_memory_nogc measured UNCOMPILED (uncompiled blocks without checkpointing take more than compiled ones), so
+    # an uncompiled run may go without checkpointing on them too; False = compiled figures, compiled runs only
+    nogc_uncompiled: bool = False
+    # GB each picture past the first takes with gradient checkpointing OFF, ((megapixels, GB), ...): what lets Auto
+    # turn checkpointing off for a batch (batch_gb is the checkpointed figure, a tenth or less of this)
+    batch_gb_nogc: tuple = ()
     optimizers: tuple = ("adamw8bit", "adamw")
     # optimizer settings a family's own trainer applied (only when Optimizer Args doesn't set them): an Adam-family
     # weight decay, and the 8-bit Adam eps floor of 1e-6 (training/optimizers.create_optimizer eps_floor_8bit - H3's
@@ -530,12 +573,41 @@ class FamilyDescription:
     adaptive_lr_clip_signal: bool = False
     adaptive_lr: bool = True          # the Adaptive LR control (off: hidden, never sent - MiniMax H3)
     loss_watch: bool = True           # the per-image loss watch toggles (off: hidden, never sent - MiniMax H3)
+    # Training maps (training/train_maps.py): where a few fixed pictures are still wrong and where the LoRA acts, each
+    # epoch - through the driver's noise_latents / predict / map_target, stills (4-D latents) only
+    training_maps: bool = True
+    # ... plus the trigger word's attention map (training/attn_probe.py): the model calls attn_probe.layout / see in
+    # its forward and attention, and its driver says where the trigger sits in its text (driver.trigger_text).
+    # An experiment, on a few families first
+    trigger_attention: bool = False
+    # Abilities this family leaves out, each with its reason: {field name: why}. checks/test_family_abilities.py
+    # fails when a picture family lacks an ability most picture families have (masked training, sliders, fine-tune,
+    # Reuse unchanged blocks, INT8 attention, Adaptive LR, the loss watch, caption dropout, batching, Detail crops, Start at
+    # a smaller size) and doesn't name it here - so a missing ability is a decision written down, never an oversight
+    not_offered: dict = field(default_factory=dict)
     # masked training (fizgig/dataset/masks.py): the driver's training_loss takes loss_mask; opt in, so a family added
     # later never gets a tick its driver can't honour
     masked_training: bool = False
+    # Element boost (an experiment, the loss weight of one part of each still early in a run; masks.face_box /
+    # element_map): tuned on MOSS-Image only, so only a family that opts in shows it (Peter, 10 Nov 2026). Needs
+    # masked_training too (the driver's training_loss takes loss_mask)
+    element_boost: bool = False
+    # see-through pictures (an RGBA VAE: Qwen Image 2.1): the latent cache keeps a picture's alpha when some of it is
+    # transparent, and the driver's decode returns RGBA when the render is; off: the alpha is dropped, as for RGB VAEs
+    rgba: bool = False
     # caption dropout (families/train.py): a share of steps trains on the empty caption's encoding, made once at the
     # start with the family's own text encoder; off for a family with its own (H3) or no pictures (ACE-Step)
     caption_dropout: bool = True
+    # Batch Size above 1 (Other Options): the driver's training_loss_batch trains several pictures of one bucket in
+    # one forward. Opt in only when it is exact - each picture's loss as its own step would give - for captions of
+    # one shape (families/train.py runs each caption shape's pictures as their own group, never padding them)
+    batch_training: bool = False
+    # what each picture past the first adds to a batched step's peak (gradient checkpointing on, as a batch always
+    # trains): (GB a picture, GB a picture per megapixel). Auto and the Batch size note plan train_memory's peak +
+    # (fixed + per_mp x megapixels) x (pictures - 1). Measured from peak VRAM at batch 1 and 3 at 0.25 and 1 MP -
+    # train_memory's own curve is the preview's peak on some families (flat across sizes), so it says nothing about
+    # a training step's pictures
+    batch_gb: tuple = (0.0, 0.0)
     # the learning rates the Start checks call usual (launch.start_checks): ((kind, low, high), ...) for "lora",
     # "finetune" and "slider" - a third of the lowest shipped preset to three times the highest; a rate outside is a
     # warning at Start, never a block. A kind left out has no rule (an optimizer that sets its own rate has none)
@@ -556,6 +628,9 @@ class FamilyDescription:
     # the Samples tab's "Turbo preview: N steps at M% strength" row (MiniMax H3) instead of the Turbo strength box:
     # the Steps box is the plain-model count, the row the turbo's
     samples_turbo_pace: bool = False
+    # the Samples tab's Turbo as a "Use the Turbo LoRA" tick (on by default) with its strength box beside it, the
+    # box keeping its value while the tick is off (MOSS-Image). Off: the strength box alone (0 = off)
+    samples_turbo_tick: bool = False
     edit_training: bool = False       # Edit LoRA from before/after pairs (the driver's supports_references)
     edit_note: str = ""               # the Edit LoRA section's "What you need" line: pair count and photo size
     # the most before-images an edited photo may have (photo.png, then photo_1.png, photo_2.png ... in the Originals
@@ -590,7 +665,7 @@ class FamilyDescription:
     # Repair Studio / Royale renders take comfy-kitchen's INT8 attention (fizgig/modules/int8_attention.py:
     # the family's attention calls attend() first). Inference only; the Profiler keeps exact attention
     int8_attention: bool = False
-    # Repair Studio's Turbo Preview tick (families/act_cache.py): a slider change replays the unchanged blocks on
+    # Repair Studio's Reuse unchanged blocks tick (families/act_cache.py): a slider change replays the unchanged blocks on
     # step 1 - the same picture as a full render
     activation_cache: bool = False
     # the text cache's padding is dropped before every step (only the tokens its <name>__attention_mask marks are
@@ -605,6 +680,13 @@ class FamilyDescription:
     workbench_checkpoint_follows_tick: bool = False
     preview_cfg: float = 1.0
     preview_width: int = 1024
+    # on a card under 20 GB, the training previews' canvas is capped to this many px on its long side (Krea 2's
+    # memory, #123); 0 = never capped - a 1 MP model falls apart below its size (MOSS-Image, #309). The training
+    # DiT parks on CPU for the decode on every small card either way
+    preview_small_card_cap: int = 0
+    # an opt-in for cards under 20 GB: the Samples tab's "Faster, smaller previews" tick caps the training previews'
+    # long side to this many px (quicker, but a 1 MP model looks worse below its size: MOSS-Image). 0 = no tick
+    preview_small_card_option: int = 0
     preview_height: int = 1024
     repair_size: int = 768            # Repair Studio's starting preview size (its Res dropdown) for the family
     block_activity: bool = False      # Repair Studio lights each block's slider as the song plays (BlockMeter)
@@ -691,6 +773,12 @@ class FamilyDescription:
         drv = getattr(importlib.import_module(mod), cls)()
         drv.description = self
         return drv
+
+    def auto_batch(self, megapixels):
+        """Batch size Auto's batch at this size (batch_auto), before any memory check: the first measured point at
+        or above it; 1 past the last, or for a family with none. Torch-free: the Training tab's note reads it."""
+        at = [p for p in (self.batch_auto or ()) if p[0] + 0.01 >= float(megapixels)]
+        return int(min(at)[1]) if at else 1
 
     def workbench_engine_class(self):
         """The class make_workbench_engine builds - read for its capabilities (supports_keyframes, ...) before any

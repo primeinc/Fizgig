@@ -1,7 +1,7 @@
 """The web UI's Image Prep: a prep run (resize / PNG / face close-ups) and the Look Consistency Filter's scan, each
 in a background thread on the Fizgig machine, with their state for the page to poll. The work itself is
 fizgig/dataset/prep.py - the same code the desktop app's Image Prep tab runs. Face tools run on the CPU, with the face
-finder and look match Image Prep's face settings pick (face_utils: InsightFace / YOLO / Auto, ArcFace / DINOv2).
+finder and look match Image Prep's face settings pick (face_utils: InsightFace / YOLO / Auto, AdaFace / DINOv2).
 """
 import base64
 import io
@@ -11,6 +11,7 @@ import threading
 import time
 
 from fizgig.dataset import prep
+from fizgig.utils.image import flatten
 from fizgig.utils.upright import upright
 
 _lock = threading.Lock()
@@ -53,7 +54,7 @@ def face_embedder(settings=None):
 
 
 def session_embedder(paths, log=None):
-    """(embedder, decision message) for one scoring session over these pictures: with Auto look match, ArcFace for a
+    """(embedder, decision message) for one scoring session over these pictures: with Auto look match, AdaFace for a
     human set and DINOv2 for a furry / anime / mixed one (face_utils.decide_look_match) - never a mix of the two."""
     from fizgig.face_utils import decide_look_match
     d = decide_look_match(list(paths), log=log)
@@ -63,7 +64,7 @@ def session_embedder(paths, log=None):
 FACE_DETECTOR_LABELS = {"insightface": "People (InsightFace, the default)",
                         "yolo": "Anime/furry/drawn (YOLO model)",
                         "auto": "Both, for sets with people and characters"}
-FACE_IDENTITY_LABELS = {"arcface": "People (the default)", "dinov2": "Anime/furry/drawn",
+FACE_IDENTITY_LABELS = {"adaface": "People (the default)", "dinov2": "Anime/furry/drawn",
                         "auto": "Auto (Decide for each set)"}
 
 
@@ -81,7 +82,7 @@ def face_settings():
     return {"detector": st["face_detector"], "identity": st["face_identity"],
             "yolo_model": str(saved.get("face_yolo_model") or ""), "auto_threshold": st["face_auto_threshold"],
             "detectors": [[k, FACE_DETECTOR_LABELS[k]] for k in ("insightface", "yolo", "auto")],
-            "identities": [[k, FACE_IDENTITY_LABELS[k]] for k in ("arcface", "dinov2", "auto")],
+            "identities": [[k, FACE_IDENTITY_LABELS[k]] for k in ("adaface", "dinov2", "auto")],
             "defaults": {"detector": F.FACE_SETTING_DEFAULTS["face_detector"],
                          "identity": F.FACE_SETTING_DEFAULTS["face_identity"]},
             "finder": det.describe(), "has_gender": det.has_gender,
@@ -182,8 +183,7 @@ def test_faces(path, face_label):
     hi = faces.index(sel) if sel in faces else None
     with Image.open(path) as img:
         img = upright(img)
-        img = img.convert("RGB") if img.mode not in ("RGB", "RGBA") else img
-        shown = draw_face_boxes(img, faces, highlight_index=hi).convert("RGB")
+        shown = draw_face_boxes(flatten(img), faces, highlight_index=hi).convert("RGB")
     shown.thumbnail((1400, 1400))
     buf = io.BytesIO()
     shown.save(buf, "JPEG", quality=88)
@@ -220,13 +220,17 @@ def embed_face_box(path, embedder=None):
     from PIL import Image
     emb = embedder or face_embedder()
     try:
-        if emb.name == "arcface":       # read as before (OpenCV, unicode-safe): the same pixels, the same numbers
+        if emb.name == "adaface":       # OpenCV, unicode-safe: the BGR pixels InsightFace finds faces in
             import cv2
             import numpy as np
-            bgr = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            raw = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            if raw is not None and raw.ndim == 3 and raw.shape[-1] == 4:     # see-through: on white
+                a = raw[..., 3:].astype(np.float32) / 255.0
+                raw = (raw[..., :3] * a + 255.0 * (1 - a)).round().astype(np.uint8)
+            bgr = None if raw is None else (cv2.cvtColor(raw, cv2.COLOR_GRAY2BGR) if raw.ndim == 2 else raw[..., :3])
             return (None, None) if bgr is None else emb.embed_bgr(bgr)
         with Image.open(path) as img:
-            return emb.embed_pil(upright(img).convert("RGB"))
+            return emb.embed_pil(flatten(upright(img)))
     except Exception:
         return None, None
 
@@ -237,7 +241,7 @@ def look_status():
         base = list(_look["baselines"])
         state, err, prog, folder = _look["state"], _look["error"], list(_look["progress"]), _look["folder"]
         thr, emb_label, decision = _look["thresholds"], _look["embedder"], _look["decision"]
-    floor = (thr or prep.ARCFACE)["floor"]
+    floor = (thr or prep.ADAFACE)["floor"]
     med, cut = prep.cutoff(scores, floor) if scores else (None, None)
     rows = []
     for p, s in scores.items():
@@ -248,7 +252,7 @@ def look_status():
     rows.sort(key=lambda r: (r["score"] is None, r["score"] if r["score"] is not None else 0.0))   # worst first
     return {"state": state, "error": err, "progress": prog, "folder": folder, "baselines": base, "rows": rows,
             "median": med, "cutoff": cut, "embedder": emb_label, "decision": decision,
-            "thresholds": thr or prep.ARCFACE}
+            "thresholds": thr or prep.ADAFACE}
 
 
 def look_scan(folder, baselines):
@@ -396,4 +400,4 @@ def start_masks(folder, kind, subject_only=False, overwrite=False, sam=None):
 def _open_rgb(path):
     from PIL import Image
     with Image.open(path) as im:
-        return im.convert("RGB")
+        return flatten(im)

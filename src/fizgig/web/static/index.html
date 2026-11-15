@@ -49,7 +49,7 @@
     // a tip under the loading line, a random one each start
     (function () {
       var tips = [
-        "Preferences → Theme: eight looks for Fizgig.",
+        "Preferences → Theme: ten looks for Fizgig.",
         "Colour-blind safe, High contrast and Dim: Preferences → Theme.",
         "Each device keeps its own theme.",
         "Pause frees the GPU; Resume carries on.",
@@ -513,6 +513,18 @@
               <div class="field-row"><span class="field-label">Task:</span>
                 <select id="capTask" class="w-combo-lg"></select>
                 <button class="btn" id="capEditInstr">Edit instructions…</button></div>
+              <div class="field-row" id="capLengthRow" style="display:none"><span class="field-label">Length:</span>
+                <select id="capLength" class="w-combo"></select>
+                <span class="field-hint">A length word, or at most this many words.</span></div>
+              <div id="capExtrasBox" style="display:none">
+                <div class="field-hint">Also tell it to (added after the main instruction and your own):</div>
+                <div class="cap-extras" id="capExtras"></div>
+                <div class="field-hint">Your own, added straight after the main instruction (before the ticked ones):
+                  write each as a plain sentence telling it what to do, one or more, in the order you want them.</div>
+                <textarea id="capExtraOwn" rows="2"
+                  placeholder="e.g. Mention the colour of her eyes. Describe the jewellery in detail. Do not describe the background."></textarea>
+                <div class="field-hint cap-sent" id="capSent"></div>
+              </div>
               <div class="field-row" id="capConceptRow" style="display:none"><span class="field-label">The concept is:</span>
                 <input type="text" id="capConcept" class="w-path" placeholder='a few plain words, e.g. "a backflip" or "a double exposure"'></div>
               <div class="field-hint" id="capConceptHint" style="display:none;margin-bottom:12px">Every caption names it in exactly these
@@ -532,6 +544,16 @@
               <div class="field-row"><span class="field-label">Max tokens:</span>
                 <input type="number" id="capTokens" class="w-num" value="120">
                 <span class="field-hint">How long a caption may be.</span></div>
+              <div id="capTagRows" style="display:none">
+                <div class="field-row"><span class="field-label">Keep tags scoring:</span>
+                  <input type="number" id="capThreshold" class="w-num" min="0.05" max="0.95" step="0.05" value="0.35">
+                  <span class="field-hint">or more (0 to 1). Higher keeps only the tags it's sure of; lower adds more tags,
+                    and more mistakes.</span></div>
+                <div class="field-row"><span class="field-label">Leave out:</span>
+                  <input type="text" id="capLeaveOut" class="w-path" placeholder="tags never to write, e.g. watermark, signature, blurry"></div>
+                <label class="checkbox-label"><input type="checkbox" id="capUnderscores">
+                  Keep underscores in tags (long_hair rather than long hair)</label>
+              </div>
               <label class="checkbox-label"><input type="checkbox" id="capOverwrite" checked>
                 Overwrite existing captions (untick to caption only the files without one)</label>
             </div>
@@ -667,6 +689,7 @@
           <div class="section-card" id="galleryCard">
             <div class="card-title">Previews so far</div>
             <div class="card-desc" id="galleryInfo">The newest first, from the current run's output folder.</div>
+            <div class="field-hint tc-warn" id="galleryError"></div>
             <div class="card-content">
               <div class="field-row gallery-controls" id="galleryControls" style="display:none">
                 <span class="field-label">Run:</span><select id="galleryRun" class="w-combo"></select>
@@ -682,7 +705,7 @@
               <div class="lik-panel" id="likPanel" style="display:none">
                 <div class="lik-run" id="likRun"></div>
                 <div class="field-hint" id="likPeak"></div>
-                <canvas id="likChart" height="150"></canvas>
+                <canvas id="likChart" height="190"></canvas>
               </div>
               <div class="preview-mode" id="galleryMode" style="display:none"></div>
               <div class="gallery" id="gallery"></div>
@@ -706,8 +729,8 @@
             <div class="card-title">Presets</div>
             <div class="card-content"><div class="field-row preset-row">
               <select id="presets" class="w-combo preset-select"></select>
-              <span class="field-hint" id="presetNote"></span>
               <button class="btn" id="presetSave">Save preset…</button>
+              <span class="field-hint" id="presetNote"></span>
               <span class="field-hint">Ready-made settings for this model, then any you saved: picking one fills
                 the form below.</span>
             </div><div id="presetSaveRow"></div></div>
@@ -726,6 +749,8 @@
                 itself mid-run loses what it trained since its last save: press Pause first.</div>
               <div id="runLoss"></div>
               <div class="il-box" id="runImageLoss" style="display:none"></div>
+              <div class="tm-box" id="runTrainMaps" style="display:none"></div>
+              <div class="field-hint start-resume" id="startResumeNote" style="display:none"></div>
               <div class="field-row">
                 <button class="btn" id="btnCheck" title="Runs Start's checks without starting: lists anything missing or wrong, else the stages a run would go through">Check settings</button>
                 <button class="btn btn-primary" id="btnStart">Start Training</button>
@@ -733,6 +758,7 @@
                 <button class="btn btn-warning" id="btnPause">Pause</button>
                 <button class="btn" id="btnSampleNow" style="display:none" title="Make the previews now, after the current training step, without waiting for the epoch to end">Sample now</button>
                 <button class="btn btn-lilac is-off" id="btnImageLoss" style="display:none" title="Each training image's loss by epoch, against the rest of the dataset: which images are still being learned, which are done, and what the loss watch decided about each">Per-image loss</button>
+                <button class="btn btn-lilac" id="btnTrainMaps" style="display:none" title="A few of your pictures, checked before training and after every epoch: where the model is still wrong, what it has learned, and where the LoRA is acting">Training maps</button>
                 <button class="btn" id="btnSaveNow" style="display:none" title="Save the LoRA as it is now, after the current training step (as name-stepNNNNNNN.safetensors)">Save now</button>
                 <button class="btn btn-primary" id="btnResume">Resume</button>
                 <button class="btn" id="btnMove" style="display:none" title="Carry on training this run on another computer running Fizgig (a pod, a laptop) while you use this one: it pauses here and resumes there, and comes back the same way">Move to…</button>
@@ -866,15 +892,15 @@
                     <input type="text" id="stSndPath" class="w-path" placeholder="a recording"><span id="stSndBtns"></span></div>
                 </div>
               </div>
-              <div class="field-row"><span class="field-label">Seed:</span><input type="text" id="stSeed" class="w-num" value="42">
-                <button class="btn btn-sm" id="stSeedNew" title="A random seed">↻</button>
+              <div class="field-row"><span class="field-label">Seed:</span><input type="text" id="stSeed" class="w-num" value="42" title="0 = random: Update picks a new seed; moving sliders keeps it (Baseline and Tweaked share it)">
+                <button class="btn btn-sm" id="stSeedNew" title="A random seed, rendered at once">↻</button>
                 <span class="field-label" id="stResLabel">Length (s):</span><select id="stRes" class="w-combo st-small-select"></select>
                 <span class="st-inline" id="stSizeRow"><span class="field-hint">Width</span><select id="stW" class="w-combo st-small-select"></select>
                   <span class="field-hint">Height</span><select id="stH" class="w-combo st-small-select"></select></span>
-                <label class="checkbox-label" id="stTurboRow" title="It keeps the unchanged blocks' results in VRAM to replay them: turn it off if VRAM is tight."><input type="checkbox" id="stTurbo" checked> Turbo Preview
-                  (late-block changes render almost at once; the same picture as a full render)</label></div>
+                <label class="checkbox-label" id="stTurboRow" title="Keeps the results of the blocks before the one you moved, so the next render only reruns from there. The same picture as a full render. Uses extra memory (in system RAM when the card is tight): untick it if memory is short."><input type="checkbox" id="stTurbo" checked> Reuse unchanged blocks
+                  (a late-block change renders almost at once; the same picture as a full render)</label></div>
               <div id="stVideoRows" style="display:none">
-                <div class="field-row"><span class="field-label">Model:</span><select id="stH3Model" class="w-combo st-small-select" title="The Reference model takes up to two photos (Frames below): say &lt;Picture 1&gt; / &lt;Picture 2&gt; in the prompt for them. Switching reloads the model at the next Start / Update (about 25 s)."></select>
+                <div class="field-row" id="stH3ModelRow"><span class="field-label">Model:</span><select id="stH3Model" class="w-combo st-small-select" title="The Reference model takes up to two photos (Frames below): say &lt;Picture 1&gt; / &lt;Picture 2&gt; in the prompt for them. Switching reloads the model at the next Start / Update (about 25 s)."></select>
                   <span class="field-label">Base:</span><select id="stH3Base" class="w-combo st-small-select"></select></div>
                 <div class="field-row"><span class="field-label">Clip:</span>
                   <span class="st-inline"><select id="stH3Len" class="w-combo st-small-select"></select>
@@ -882,10 +908,11 @@
                     <span class="field-hint">H</span><select id="stH3H" class="w-combo st-small-select"></select></span></div>
                 <div class="field-row"><span class="field-label"></span>
                   <span class="st-inline"><span class="field-hint">Steps</span><input type="text" id="stH3Steps" value="4" title="Sampling steps for the clip. With Turbo at 1.0, 4 steps is the fast loop; Turbo 0 needs about 20.">
-                    <span class="field-hint">Turbo</span><input type="text" id="stH3Turbo" value="1" title="Strength of the built-in Turbo LoRA: 1.0 for the fast loop, 0.75 matches the in-training previews. 0 switches it off - the render is the base plus your LoRAs at the steps set. That is how you edit a Turbo LoRA: load it as the primary and set this to 0.">
-                    <label class="checkbox-label"><input type="checkbox" id="stH3Sound" checked> Sound</label>
+                    <span class="field-hint" id="stH3TurboLabel">Turbo</span><input type="text" id="stH3Turbo" value="1" title="Strength of the built-in Turbo LoRA: 1.0 for the fast loop, 0.75 matches the in-training previews. 0 switches it off - the render is the base plus your LoRAs at the steps set. That is how you edit a Turbo LoRA: load it as the primary and set this to 0.">
+                    <label class="checkbox-label" id="stH3SoundBox"><input type="checkbox" id="stH3Sound" checked> Sound</label>
                     <label class="checkbox-label" title="The first half of the steps (rounded down: 7 steps gives 3) render at half size, then the clip grows to full size for the rest - a faster render. The layout is worked out at half size, so a seed frames differently with it on. From Fizgig's H3 Speed Boost node (SPEED, Xiao et al. 2026, via LC Speed Boost)."><input type="checkbox" id="stH3Boost" checked> Speed Boost</label>
-                    <label class="checkbox-label" title="Put up the pass-2 estimate in the Tweaked pane while the remaining passes run"><input type="checkbox" id="stH3Early" checked> Show early</label></span></div>
+                    <label class="checkbox-label" id="stH3EarlyBox" title="Put up the pass-2 estimate in the Tweaked pane while the remaining passes run"><input type="checkbox" id="stH3Early" checked> Show early</label></span></div>
+                <div class="field-row"><span class="field-label"></span><span class="field-hint" id="stH3Note"></span></div>
               </div>
               <div class="field-row" id="stNegRow"><span class="field-label">Negative:</span>
                 <textarea id="stNeg" rows="2" spellcheck="false"></textarea></div>
@@ -932,7 +959,7 @@
                 <figure class="gallery-item st-pane"><img id="stBase" alt=""><video id="stBaseVid" controls loop muted playsinline preload="auto"
                   style="display:none"></video><audio id="stBaseAud" controls style="display:none"></audio>
                   <figcaption id="stBaseCap">Baseline (LoRA at default 1.0)</figcaption></figure>
-                <figure class="gallery-item st-pane"><div class="st-region" id="stRegion"></div><img id="stTweak" alt=""><video id="stTweakVid" controls loop muted playsinline preload="auto"
+                <figure class="gallery-item st-pane st-tweak-pane"><div class="st-region" id="stRegion"></div><img id="stTweak" alt=""><canvas id="stMapCanvas" class="st-map-canvas" style="display:none"></canvas><div class="st-map-badge" id="stMapBadge" style="display:none"><span class="st-map-spin"></span>Making the map…</div><video id="stTweakVid" controls loop muted playsinline preload="auto"
                   style="display:none"></video><audio id="stTweakAud" controls style="display:none"></audio>
                   <figcaption id="stTweakCap">Tweaked (current sliders)</figcaption></figure>
               </div>
@@ -943,10 +970,26 @@
                 <span class="st-chip" id="stMetLike"></span><span class="st-chip" id="stMetGrid"></span>
                 <span class="st-chip" id="stMetTex"></span><span class="st-chip" id="stMetClip"></span><span class="st-chip" id="stMetSat"></span>
               </div>
+              <div class="st-maps" id="stMaps" style="display:none">
+                <div class="st-maps-head"><span class="st-maps-title"
+                  title="Heatmaps over the Tweaked picture, as Training maps draws them: the picture is noised at three levels and the model's prediction compared with and without the LoRA">Maps</span>
+                  <span class="st-map-pill" id="stMapPill" style="display:none"><span class="st-map-spin"></span>Making the map…</span></div>
+                <div class="tm-row" id="stMapKinds"></div>
+                <div class="st-map-explain" id="stMapKindSay"></div>
+                <div id="stMapOpts" style="display:none">
+                  <div class="tm-row" id="stMapLevels"></div>
+                  <div class="tm-row" id="stMapTrigRow" style="display:none"><label class="tm-auto">Trigger word
+                    <input type="text" id="stMapTrig" class="st-map-trig" placeholder="from the LoRA" spellcheck="false"></label>
+                    <button class="btn btn-sm" id="stMapGo" title="Make the trigger word's map for the word in the box (or press Enter)">Show</button></div>
+                  <div class="tm-row"><label class="tm-auto">Opacity <input type="range" id="stMapOp" class="tm-opacity" min="0" max="150" step="5" value="100"></label>
+                    <span class="st-map-key">Colour key:</span><span class="tm-legend-end">less</span><span class="tm-legend" id="stMapLegend"></span><span class="tm-legend-end">more</span></div>
+                </div>
+                <div class="st-map-note" id="stMapSay" style="display:none"></div>
+              </div>
               <div class="field-row" id="stPlayBoth" style="display:none"><button class="btn btn-sm" id="stPlayBothBtn">▶ Play together</button></div>
               <div class="field-row" id="stDownloads" style="display:none">
                 <a class="btn btn-sm" id="stDlBase" title="The Baseline as rendered: the LoRA at its load strength, before your slider changes">💾 Download original</a>
-                <a class="btn btn-sm" id="stDlTweak" title="The Tweaked render as it is now, with your slider changes">💾 Download tweaked</a></div>
+                <a class="btn btn-sm" id="stDlTweak" title="The Tweaked render as it is now, with your slider changes. A picture keeps Studio's settings inside it (the LoRAs, every slider, the prompt and seed): drop it on this tab to get them all back.">💾 Download tweaked</a></div>
               <div class="st-song" id="stSong" style="display:none">
                 <div class="field-row st-song-btns">
                   <button class="btn btn-sm" id="stSongBaseline" data-side="baseline">▶ Baseline</button>
@@ -1533,6 +1576,10 @@
               <div class="field-row"><span class="field-label">Trained checkpoint:</span>
                 <input type="text" id="exFtTuned" class="w-path" placeholder="the fine-tune's checkpoint"><span id="exFtTunedBtns"></span></div>
               <div class="field-row"><span class="field-label">Ranks:</span><span id="exFtRanks" class="st-inline"></span></div>
+              <div class="field-row"><label class="checkbox-label"><input type="checkbox" id="exFtId"> Identity mode</label>
+                <span class="field-hint">For a person or character: the identity blocks keep 4x the rank, so the
+                  likeness survives a smaller file (MOSS-Image blocks 24-35, Qwen Image 2.1 blocks 10-14; other models
+                  extract as normal). Saved with _id in the name.</span></div>
               <div class="field-hint ex-ft-hint">One LoRA per ticked rank, all from a single SVD pass - four ranks cost about what one
                 does. Higher ranks stay closer to the fine-tune and make bigger files; on a three-subject Krea 2 run, 64 was
                 indistinguishable from the fine-tune. It runs on the GPU: free it first if a training run or a Studio preview is
@@ -1575,6 +1622,8 @@
                   <option selected>4</option><option>8</option><option>16</option><option>32</option><option>64</option>
                   <option>128</option><option value="__other">Other…</option></select>
                 <input id="exRank" type="number" min="1" step="1" value="4" class="ex-rank" placeholder="Rank"></div>
+              <div class="field-row" id="exIdRow"><label class="checkbox-label"><input type="checkbox" id="exId"> Identity mode</label>
+                <span class="field-hint" id="exIdHint"></span></div>
             </div>
           </div>
           <div class="section-card">
@@ -1731,6 +1780,9 @@
               opens RunPod's page with that card and the template chosen. Once it has started it shows above by itself
               (with your key), or paste its ID.</div>
             <div class="card-content">
+              <a class="google-pill" href="https://console.runpod.io/deploy?type=GPU&amp;gpu=RTX+5090&amp;count=1&amp;template=bdrdew7hxw&amp;ref=vkb387ep"
+                target="_blank" rel="noopener" title="Open RunPod through Fizgig's link"><svg viewBox="0 0 48 48" aria-hidden="true"><path class="g-r" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.5 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path class="g-b" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 7l7.2 5.6c4.2-3.9 7.1-9.6 7.1-17.1z"/><path class="g-y" d="M10.5 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.8-6.1z"/><path class="g-g" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.2-5.6c-2 1.4-4.7 2.3-8.7 2.3-6.2 0-11.5-4.2-13.4-9.9l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>
+                <span>New to RunPod? <b>Sign up with Google</b> to support Fizgig</span></a>
               <div class="pick-disk"><b>On RunPod's page, add a disk before you deploy</b> (it isn't added for you):
                 <ol>
                   <li>On the right of RunPod's page, in the box called <b>Nothing mounted at the template's
@@ -1935,6 +1987,17 @@
     </div>
   </div>
 
+  <div class="modal-backdrop" id="startupModal">
+    <div class="modal-window startup-window">
+      <div class="modal-header"><span id="startupTitle"></span>
+        <button class="btn" id="startupLater" title="Decide later: nothing starts, and the queue stays held">✕</button></div>
+      <div class="modal-body">
+        <div id="startupText"></div>
+        <div class="startup-choices" id="startupChoices"></div>
+        <div class="field-hint" id="startupNote"></div>
+      </div>
+    </div>
+  </div>
   <div class="modal-backdrop" id="cropModal">
     <div class="modal-window crop-window">
       <div class="modal-header"><span id="cropTitle">Crop to the clip's shape</span>
@@ -2019,6 +2082,37 @@
     </div>
   </div>
 
+  <!-- the job the tabs show (app.js jobPillShow): top right, clear of the app window's bar in the top middle -->
+  <div class="job-pill" id="jobPill" style="display:none">
+    <span class="job-pill-grip" id="jobPillGrip" aria-hidden="true" title="Drag to move it; double-click puts it back"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+    <button class="job-pill-text" id="jobPillText" aria-haspopup="true"></button>
+    <div class="job-pill-menu" id="jobPillMenu" role="menu" hidden></div>
+  </div>
+  <div class="job-pill-shade" id="jobPillShade" hidden></div>
+
+  <!-- On Windows with an NVIDIA card: turn off CUDA Sysmem Fallback, once a launch until Don't show this again -->
+  <div class="modal-backdrop" id="sysmemModal">
+    <div class="modal-window sysmem-window">
+      <div class="modal-header"><span>For full training speed on Windows</span>
+        <button class="btn btn-sm" id="sysmemX" title="Close">✕</button></div>
+      <div class="modal-body sysmem-body">
+        <p>NVIDIA's driver can quietly move part of a training run into system RAM when the card fills up. Nothing
+          crashes, but training can run several times slower, and a driver or Windows update can switch it on.</p>
+        <p><b>To turn it off:</b> open <b>NVIDIA Control Panel</b> → <b>Manage 3D settings</b> → <b>Global Settings</b>,
+          set <b>CUDA - Sysmem Fallback Policy</b> to <b>Prefer No Sysmem Fallback</b>, click Apply, and restart
+          Fizgig.</p>
+        <p class="field-hint">Use Global Settings, not Program Settings: Fizgig's Python there is only a launcher, so a
+          per-program setting never reaches it. With it off, a run too big for your card stops with an out-of-memory
+          message instead of slowing down, and Fizgig retries it lighter by itself.
+          <a href="https://github.com/shootthesound/Fizgig/blob/master/docs/INSTALL.md#training-suddenly-several-times-slower-windows-shared-gpu-memory" target="_blank" rel="noopener">More in the install guide</a></p>
+      </div>
+      <div class="modal-footer">
+        <label class="checkbox-label"><input type="checkbox" id="sysmemNever"> Don't show this again</label>
+        <button class="btn btn-primary" id="sysmemClose">OK</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-backdrop" id="loginModal">
     <div class="modal-window" style="width: 380px;">
       <div class="modal-header"><span>Log in</span></div>
@@ -2042,7 +2136,7 @@
     <button class="btn lightbox-step" id="lightboxPrev" title="Previous (←). On previews: ← → the same prompt an epoch earlier or later, ↑ ↓ the other prompts at this epoch">‹</button>
     <figure class="lightbox-figure"><div class="lightbox-mode" id="lightboxMode" style="display:none"></div><img id="lightboxImg" alt=""><figcaption id="lightboxName"></figcaption>
       <div class="lightbox-cap" id="lightboxCap" style="display:none">
-        <textarea id="lightboxCapText" rows="3" spellcheck="true"></textarea>
+        <textarea id="lightboxCapText" class="fit-text" rows="3" spellcheck="true"></textarea>
         <div class="lightbox-cap-row"><button class="btn btn-primary btn-sm" id="lightboxCapSave"
           title="Save the caption (Ctrl+Enter)">Save</button>
           <button class="btn btn-sm" id="lightboxCapRecap" title="Write this file's caption again with the model and task on the Captions tab">Re-caption</button>

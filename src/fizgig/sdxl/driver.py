@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from fizgig.families.driver import Block, BlockGroup, FamilyDriver, prior_base, weighted_loss, with_prior
+from fizgig.families.driver import Block, BlockGroup, FamilyDriver, picture_losses, prior_base, weighted_loss, with_prior
 
 CONFIG_REPO = "stabilityai/stable-diffusion-xl-base-1.0"
 DTYPE = torch.bfloat16
@@ -121,6 +121,23 @@ class _TextEncoders:
             torch.cuda.empty_cache()
 
 
+class _ProbeProcessor:
+    """A diffusers attention processor that first hands the cross-attention's queries and keys ([B, H, L, D], the
+    LoRA included) to the training maps' trigger-word probe, then runs the original."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None, *args, **kwargs):
+        from fizgig.training import attn_probe
+        if attn_probe._ACTIVE is not None and encoder_hidden_states is not None and hidden_states.dim() == 3:
+            q, k = attn.to_q(hidden_states), attn.to_k(encoder_hidden_states)
+            b, h = q.shape[0], attn.heads
+            attn_probe.see(q.view(b, -1, h, q.shape[-1] // h).transpose(1, 2),
+                           k.view(b, -1, h, k.shape[-1] // h).transpose(1, 2))
+        return self.inner(attn, hidden_states, encoder_hidden_states, *args, **kwargs)
+
+
 class SDXLDriver(FamilyDriver):
 
     # ---- models ---------------------------------------------------------------------------------
@@ -206,11 +223,45 @@ class SDXLDriver(FamilyDriver):
         return {"xt": a.sqrt() * x0 + (1 - a).sqrt() * noise, "t": t, "a": a, "x0": x0, "noise": noise,
                 "hw": (x0.shape[-2] * 8, x0.shape[-1] * 8)}
 
+    def trigger_key_positions(self, caption, word):
+        """The caption's CLIP tokens sit in 75-token chunks, each BOS + chunk + EOS + padding (77): token i is key
+        77 * (i // 75) + 1 + i % 75 (_chunks). Both CLIPs tokenize alike."""
+        from fizgig.families import trigger_check
+        from fizgig.training.attn_probe import trigger_positions
+        tok = trigger_check.fast_tokenizer("sdxl")
+        return [77 * (i // 75) + 1 + i % 75 for i in trigger_positions(tok, caption, "", caption, word)]
+
+    def trigger_attention_hooks(self, dit):
+        """The UNet's cross-attention processors (attn2), each wrapped to pass its queries and keys to the probe."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def hooks():
+            mods = [m for n, m in dit.named_modules() if n.endswith("attn2") and hasattr(m, "processor")]
+            old = [m.processor for m in mods]
+            for m, p in zip(mods, old):
+                m.processor = _ProbeProcessor(p)
+            try:
+                yield
+            finally:
+                for m, p in zip(mods, old):
+                    m.processor = p
+        return hooks()
+
     def predict(self, dit, state, cond):
         """The UNet's output (epsilon, or v for a v-pred checkpoint) at a noise_latents() state."""
         h, w = state["hw"]
         xt = state["xt"]
+        from fizgig.training import attn_probe
+        if attn_probe._ACTIVE is not None:      # the trigger map reads the quarter-size blocks (down 2, mid, up 0)
+            n = (xt.shape[-2] // 4) * (xt.shape[-1] // 4)
+            attn_probe.layout((0, n), 0, n, kv_total=-1)
         return self._unet(dit, xt, torch.tensor([state["t"]], device=xt.device), cond, h, w)
+
+    def map_target(self, latents, state):
+        """The UNet's target at this state (training maps): epsilon, or v for a v-pred checkpoint."""
+        a, x0, noise = state["a"], state["x0"], state["noise"]
+        return (a.sqrt() * noise - (1 - a).sqrt() * x0) if self._v_pred() else noise
 
     def training_loss(self, dit, latents, cond, generator, *, min_t=0.0, max_t=1.0, refs=None, diff_ref=None,
                       diff_weight=0.0, loss_mask=None, prior=None):
@@ -241,6 +292,35 @@ class SDXLDriver(FamilyDriver):
             snr = float(a / (1 - a))
             loss = loss * (min(snr, gamma) / ((snr + 1) if self._v_pred() else snr))
         return loss, {"t": st["t"] / 999.0}
+
+    def training_loss_batch(self, dit, latents, cond, generator, *, min_t=0.0, max_t=1.0, loss_mask=None):
+        """Batch Size above 1: each picture's timestep and noise drawn by noise_latents in turn (training_loss's
+        draws, picture by picture), one UNet call for them all, the loss each picture's own and their mean."""
+        sts = [self.noise_latents(latents[i:i + 1], generator, min_t=min_t, max_t=max_t)
+               for i in range(latents.shape[0])]
+        h, w = sts[0]["hw"]
+        xt = torch.cat([st["xt"] for st in sts])
+        ts = torch.tensor([st["t"] for st in sts], device=xt.device)
+        a = torch.stack([st["a"] for st in sts]).view(-1, 1, 1, 1)
+        x0, noise = torch.cat([st["x0"] for st in sts]), torch.cat([st["noise"] for st in sts])
+        pred = self._unet(dit, xt, ts, cond, h, w).float()
+        target = (a.sqrt() * noise - (1 - a).sqrt() * x0) if self._v_pred() else noise
+        se = (pred - target).pow(2)
+        losses = []
+        for i in range(len(sts)):
+            if loss_mask is None:
+                li = se[i:i + 1].mean()
+            else:
+                li = weighted_loss(se[i:i + 1].mean(dim=1).flatten(1), loss_mask[i:i + 1].float().to(se.device).flatten(1))
+            gamma = float(self.options.get("min_snr") or 0.0)
+            if gamma:
+                ai = sts[i]["a"]
+                snr = float(ai / (1 - ai))
+                li = li * (min(snr, gamma) / ((snr + 1) if self._v_pred() else snr))
+            losses.append(li)
+        per = torch.stack(losses)
+        return per.mean(), {"t": sum(st["t"] for st in sts) / len(sts) / 999.0, "per": per,
+                            "ts": [float(st["t"]) / 999.0 for st in sts]}
 
     # ---- sampling -------------------------------------------------------------------------------
     @torch.no_grad()

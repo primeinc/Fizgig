@@ -387,6 +387,59 @@ class ModelOffloader(Offloader):
                 if hook is not None:
                     handle = block.register_full_backward_hook(hook)
                     self.remove_handles.append(handle)
+        # a backward that stops early - a LoRA on some blocks only (Fast Identity Mode, a Model Area) leaves the blocks
+        # before them without gradients, so their hooks never fire and the blocks they would bring back stay on the
+        # CPU for the next forward ("mat2 is on cpu", #302). Counted here; the next forward puts every block back first.
+        self._blocks = list(blocks)
+        self._bw_expected = len(self.remove_handles)
+        self._bw_fired = 0
+        self._trained_forward = False
+        self._said_restore = False
+        # Several forwards, then one backward (Batch size above 1: a picture each, or a group per caption shape). The
+        # swap is written for one forward and one backward: each later forward needs the blocks back where a forward
+        # starts, and the backward unwinds the newest graph first, which leaves the last blocks on the CPU just when
+        # the graph before it starts at them ("mat2 is on cpu", #335). Both are put right a pair at a time, the block
+        # leaving the card first, so the card never holds more blocks than the swap allows
+        self._graphs = 1
+        if self.supports_backward and blocks_to_swap:
+            self.remove_handles.append(blocks[-1].register_forward_pre_hook(self._before_last_block))
+
+    @staticmethod
+    def _on_card(block: nn.Module) -> bool:
+        for m in _streamed_linears(block).values():
+            return m.weight.device.type != "cpu"
+        return True
+
+    def _relayout(self, to_end: bool) -> int:
+        """Every swapped pair put where a forward starts (the first blocks on the card, the last ones off it) or
+        where it ends (to_end: the reverse, where a backward starts). A pair already there is left alone. -> pairs
+        moved."""
+        for idx in list(self.futures.keys()):
+            self._wait_blocks_move(idx)
+        n, k, moved = self.num_blocks, int(self.blocks_to_swap or 0), 0
+        for i in range(k):
+            early, late = self._blocks[i], self._blocks[n - k + i]
+            to_cpu, to_card = (early, late) if to_end else (late, early)
+            if self._on_card(to_card):
+                continue
+            event = self.swap_weight_devices(to_cpu, to_card)
+            if self.cuda_available and event is not None:
+                torch.cuda.current_stream().wait_event(event)
+            moved += 1
+        if moved:
+            _synchronize_device(self.device)
+        return moved
+
+    def _before_last_block(self, _module, _args):
+        """The last block is about to run. In a forward it was waited for, so it is on the card. Off the card, this
+        is a backward recomputing it for an earlier graph of the step, after a later graph's backward sent it away:
+        the blocks go back to where a backward starts."""
+        if self.forward_only or not self.blocks_to_swap:
+            return
+        for idx in list(self.futures.keys()):
+            self._wait_blocks_move(idx)
+        if not self._on_card(self._blocks[-1]):
+            self._relayout(to_end=True)
 
     def set_forward_only(self, forward_only: bool):
         # Switching must wait for all pending transfers
@@ -426,6 +479,7 @@ class ModelOffloader(Offloader):
         def backward_hook(module, grad_input, grad_output):
             if self.debug:
                 print(f"Backward hook for block {block_index}")
+            self._bw_fired += 1
 
             if swapping:
                 self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
@@ -438,6 +492,8 @@ class ModelOffloader(Offloader):
     def prepare_block_devices_before_forward(self, blocks: list[nn.Module]):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
+        self._trained_forward, self._bw_fired = False, 0
+        self._graphs = 1
 
         if self.debug:
             print(f"[{self.block_type}] Prepare block devices before forward")
@@ -457,6 +513,29 @@ class ModelOffloader(Offloader):
     def wait_for_block(self, block_idx: int):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
+        if block_idx == 0 and not self.forward_only and self._trained_forward and self._bw_fired == 0:
+            # another forward of the same step, no backward yet: the blocks back to where a forward starts
+            self._relayout(to_end=False)
+            self._graphs += 1
+            self._trained_forward = False
+        elif block_idx == 0 and not self.forward_only and self._trained_forward and self._graphs > 1:
+            # the step before had several graphs and one backward: any pair it left out of place (a backward that
+            # stops early leaves some) goes back; after a full backward there is nothing to move
+            self._relayout(to_end=False)
+            self._graphs = 1
+            self._trained_forward, self._bw_fired = False, 0
+        elif block_idx == 0 and not self.forward_only and self._trained_forward:
+            if self._bw_fired < self._bw_expected:
+                # the last backward stopped before reaching every hooked block: put each block where a fresh forward
+                # expects it (the moves already queued first)
+                for idx in list(self.futures.keys()):
+                    self._wait_blocks_move(idx)
+                if not self._said_restore:
+                    self._said_restore = True
+                    print(f"[{self.block_type}] block swap: the backward stops before the first blocks (a LoRA on some "
+                          "blocks only) - their places are restored before each step", flush=True)
+                self.prepare_block_devices_before_forward(self._blocks)
+            self._trained_forward, self._bw_fired = False, 0
         self._wait_blocks_move(block_idx)
 
     def submit_move_blocks_forward(self, blocks: list[nn.Module], block_idx: int):
@@ -464,6 +543,7 @@ class ModelOffloader(Offloader):
             return
 
         if not self.forward_only:
+            self._trained_forward = True
             # With backward enabled, do not swap beyond blocks_to_swap (those must stay on GPU)
             if block_idx >= self.blocks_to_swap:
                 return

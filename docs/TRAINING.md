@@ -2,11 +2,12 @@
 
 [← Back to the README](../README.md)
 
-Everything on this page works on every model unless it says otherwise: [Klein 9B](KLEIN.md), [Flux 3 Image Klein](FLUX3.md), [Krea 2](KREA2.md), [MiniMax H3](MINIMAX_H3.md) and [Qwen Image 2.1](QWEN_IMAGE.md).
+Everything on this page works on every model unless it says otherwise: [Klein 9B](KLEIN.md), [Flux 3 Image Klein](FLUX3.md), [Fibo 2.0](FIBO2.md), [Krea 2](KREA2.md), [MiniMax H3](MINIMAX_H3.md) and [Qwen Image 2.1](QWEN_IMAGE.md).
 
 ## The sample gallery is an instrument
 
-- **Live likeness scoring** — pick 3 dataset photos and every sample gets a colour-coded likeness badge (ArcFace for people, DINOv2 for furry / anime: [face backends](FACE_BACKENDS.md); CPU — zero training-speed cost), with a per-epoch trend chart and best-epoch highlight, live while the run goes.
+- **Live likeness scoring** — pick 3 dataset photos and every sample gets a colour-coded likeness badge (AdaFace ViT for people, DINOv2 for furry / anime: [face backends](FACE_BACKENDS.md); CPU — zero training-speed cost), with a per-epoch trend chart and best-epoch highlight, live while the run goes. The chart also shows **your photos**: your own training photos scored against the same 3, the realistic top a preview can reach (even real photos of a person never score 100%), and the run line says whether the best epoch is within, level with or above them. The three photos are remembered with the training folder, so every run of the same person uses them without picking again, and each run keeps its own scores: switching between runs in the gallery never clears or mixes them. The 🎨 Style score works the same way: switched on for a run, it stays on for that training folder's other runs, and each run keeps its own scores.
+- **Star the previews you like** — the ☆ in a preview's top corner (always shown on a phone) stars it without opening it; starred previews get a gold frame, and when the run is done the checkpoint lists (the run card, Runs & outputs) put a ★ beside each starred epoch's checkpoint, so your shortlist is waiting there. Stars live in the samples folder with the previews.
 - **Training Run Visualiser** — scrub the run epoch by epoch in the browser, Royale-style, with share-ready WebM/PNG export.
 - **Every epoch checkpoint carries its own preview as the thumbnail**, so file browsers and LoRA managers show what each epoch looks like.
 - **How often to preview** (Samples tab): **Every** N epochs, and, switched on, **then from epoch** Y, **every** Z epochs (whole multiples). Switching it on fills in every 5, then from epoch 10 every 1: few previews early, every epoch once the run gets close. Off, previews run every N epochs throughout.
@@ -19,8 +20,16 @@ Everything on this page works on every model unless it says otherwise: [Klein 9B
 - **AI captioning with Krea 2's Qwen3-VL-4B** — every model's captions, on the Captions tab and in auto-recaption, come from it. It writes training captions from editable presets at four lengths, each in a version for a person or character and one for an object or product, plus **Style**, which describes everything *except* the look so your trigger word binds to it. Every preset's instruction is editable in plain English and persists. Auto-recaption uses them too: the Training tab's **First try uses** and **Second try uses** pick a task each (Training caption, then Exhaustive detail, by default). Both defaults are the person versions, so for an object pick the object or product versions, for a style Style, or Custom with your own instruction. Florence-2 is the zero-setup option. **Bilingual captions** (English + Chinese via Helsinki-NLP) act as text-level augmentation — measurably better skin detail on Klein at identical loss.
 - **Image Prep** — batch resize, PNG conversion, face crops (InsightFace with gender targeting for people, or a YOLO face model such as Fdetailer for furry / anime characters: [face backends](FACE_BACKENDS.md)). Pairing a tight crop with a full shot adds a lot to a character dataset.
 - **Masks for masked training** — Image Prep makes a mask for every picture in a folder (the person, just the face and hair, the body without the face, and more), so training learns the part that matters, not the room around it. See [Masked training](MASKED_TRAINING.md).
-- **Look Consistency Filter** — pick the 3 images that best nail the look and every image is scored against them (ArcFace, or DINOv2 for furry / anime faces). Worst matches surface first; mark drifters or let Auto-Suggest flag the outliers, then move them out in one click — nothing is deleted, and the scores feed the trainer's [look-outlier warm-up](KREA2.md#the-trainer-curates-your-dataset-while-it-trains-experimental).
+- **Look Consistency Filter** — pick the 3 images that best nail the look and every image is scored against them (AdaFace ViT, or DINOv2 for furry / anime faces). Worst matches surface first; mark drifters or let Auto-Suggest flag the outliers, then move them out in one click — nothing is deleted, and the scores feed the trainer's [look-outlier warm-up](KREA2.md#the-trainer-curates-your-dataset-while-it-trains-experimental).
 - **Sub-folders (optional)** — tick **Also train on its sub-folders** on the Training tab and a big dataset can stay organised in folders (outfits, forms, sources), each trained with its own captions and cache. Off by default. See [Sub-folders](#sub-folders) below.
+
+## Element boost: one part of each picture learns faster
+
+**Element boost (experimental)**, in Training Parameters, for MOSS-Image and MiniMax H3 Image. Early in the run one part of each picture counts much more than the rest, so it's learned sooner: by default the face and hair, which brings likeness in faster, most of all when faces are small in the frame. It runs three boosted stretches then one normal, for the first 12 epochs or 600 steps, whichever comes first; after that the run trains as normal, so the body and background catch up. It works with or without masks (a mask trims it), and a picture where the part isn't found trains as normal. It's on in MOSS-Image's Standard preset; on MiniMax H3 Image it's off in every preset, so tick it to try it.
+
+**It needs Target Megapixels 0.75 or more** (with Start at a smaller size, that size too, since the boost runs early in the run); below that the tick is greyed out. The model sees a picture as 16-pixel patches, and in a medium or full-length shot a face at 0.5 MP can be just one to three patches wide: boosting it teaches the LoRA pixelation. It's for sets where the boosted part (the face, the clothes and so on) is small in the frame.
+
+**What it boosts:** Face and hair (the default) or Face only come from the face finder; Face only suits a subject whose hair changes between pictures. The other choices are the same as Make masks' person finder (the clothes, the body, the background and so on), found with the same model. The clothes choice suits an outfit LoRA, not a person one. [Masked training](MASKED_TRAINING.md) explains masks.
 
 ## Sub-folders
 
@@ -70,6 +79,17 @@ The Training tab's **Subjects** card says who the LoRA is of and how it behaves 
 
 How to caption for it, choose trigger words and prompt the finished LoRA: [People in group pictures](MULTI_PERSON.md).
 
+### Regularisation dataset
+
+For a LoRA that changes too much besides its subject: plain prompts drift toward your subject, or the whole style shifts. The fold at the bottom of the Subjects card, under **Check a trigger word**, trains a second folder alongside your training pictures: ordinary pictures of the same kind of thing (other people for a person, other characters for a character, other pictures in the genre for a style). They hold the model's idea of that kind of thing in place while your subject trains. It works for any subject, anime and drawn characters included, where Fizgig LoRA Isolation suits people best.
+
+- **Train with a regularisation dataset** turns it on. The rest of the Subjects card is set aside for that run: one subject (the training folder), no DOP, no Fizgig LoRA Isolation. Those choices are greyed out and keep their values, so unticking brings them back.
+- **Regularisation pictures:** real pictures, not ones the model made (those teach it its own mistakes). Every picture needs a caption that describes it and does not use your trigger word; Start refuses pictures without one and warns about captions that use the trigger. Caption them by making that folder the training folder on Start for a moment, then switching back.
+- **Regularisation LR ×:** the share of the learning rate the regularisation pictures train at. 1.0 (the default) trains them as firmly as your own pictures; lower makes them a lighter anchor.
+- **Use each epoch:** how many of the folder's pictures each epoch trains on, a different handful each epoch, so over a run the whole folder is used. **Match my training pictures** (the default) takes as many as your training pictures; or a share of the folder from 10% to 100%. The line beside it says how many that is and how long an epoch becomes.
+- Standard LoRA and LoKR, on every still-picture model. A fine-tune has its own regularisation folder on its card. While it is on, a run can't be shared with a helper GPU (Move a run still takes the folder with it).
+- Regularisation pictures are never judged, throttled, excluded or recaptioned by the per-image loss watch, never masked or face-boosted, and never used for training maps.
+
 ## Output folders
 
 The LoRA output folder lives on the Training tab's Output section and is remembered per model: switch models and each gets its own folder back. The default is `output_loras` inside Fizgig.
@@ -84,7 +104,7 @@ Each tool works on a trained run's output **or any LoRA you've downloaded** — 
 
 ### Repair Studio
 
-A live slider per transformer block (32 on Klein, up to 50 + the token refiners on MiniMax H3) with a side-by-side preview that updates as you drag. **Turbo Preview** caches per-block activations so late-block edits redraw up to 97% faster; the baked save is always exact. Blend blocks from a second **donor** LoRA, balance the pair per block, condition previews on a reference photo, and save a `.safetensors` that works in ComfyUI at strength 1.0. On MiniMax H3 the previews are **clips with sound**, played side by side in the app, with a per-block library and first/last-frame conditioning — see [Repair Studio on H3](MINIMAX_H3.md#repair-studio-on-h3). Krea 2 has its own **✨Text fusion** presets — see [KREA2.md](KREA2.md#help-map-krea-2s-blocks).
+A live slider per transformer block (32 on Klein, up to 50 + the token refiners on MiniMax H3) with a side-by-side preview that updates as you drag. **Reuse unchanged blocks** caches per-block activations so late-block edits redraw up to 97% faster; the baked save is always exact. Blend blocks from a second **donor** LoRA, balance the pair per block, condition previews on a reference photo, and save a `.safetensors` that works in ComfyUI at strength 1.0. On MiniMax H3 the previews are **clips with sound**, played side by side in the app, with a per-block library and first/last-frame conditioning — see [Repair Studio on H3](MINIMAX_H3.md#repair-studio-on-h3). Krea 2 has its own **✨Text fusion** presets — see [KREA2.md](KREA2.md#help-map-krea-2s-blocks).
 
 ### Exploring variations
 
@@ -100,4 +120,4 @@ How much rank a LoRA really uses and where its weights are, then renders with ea
 
 ### Extract
 
-Distil any Klein, Flux 3 Image Klein, Krea 2, MiniMax H3 or Qwen Image 2.1 LoRA to a lower rank — it runs weight-only SVD with no models loaded, and Klein's presets keep just the Identity, Style+Composition or Details blocks (or any blocks you pick). PEFT and LyCORIS sources supported.
+Distil any Klein, Flux 3 Image Klein, Fibo 2.0, Krea 2, MiniMax H3 or Qwen Image 2.1 LoRA to a lower rank — it runs weight-only SVD with no models loaded, and Klein's presets keep just the Identity, Style+Composition or Details blocks (or any blocks you pick). PEFT and LyCORIS sources supported.

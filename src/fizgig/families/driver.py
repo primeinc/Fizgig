@@ -51,6 +51,18 @@ def weighted_loss(se, *weights):
     return (se * w).mean()
 
 
+def picture_losses(se, *weights):
+    """Batch Size above 1: each picture's weighted_loss, `se`'s first dim being the pictures -> (B,). Their mean is
+    weighted_loss over the batch (each picture's weights scaled to mean 1 on its own)."""
+    ws = [w for w in weights if w is not None]
+    if ws:
+        w = ws[0].to(se.device, se.dtype)
+        for x in ws[1:]:
+            w = w * x.to(se.device, se.dtype)
+        se = se * (w / w.mean(dim=tuple(range(1, w.dim())), keepdim=True).clamp_min(1e-8))
+    return se.reshape(se.shape[0], -1).mean(dim=1)
+
+
 def prior_base(prior, loss_mask, forward):
     """Masked prior preservation: the model's own prediction at this step's noised input with the LoRA at 0
     (prior.base runs `forward` that way), or None - no prior asked for, or a picture without a mask. Taken BEFORE the
@@ -65,7 +77,8 @@ def with_prior(loss, prior, base, se_base, mw, *weights):
     error against base, the shape `loss` was taken over."""
     if base is None or mw is None:
         return loss
-    return loss + float(prior.weight) * weighted_loss(se_base, *weights, 1.0 - mw)
+    # clamped: a face boost (weights above 1, inside the mask) never makes the outside negative
+    return loss + float(prior.weight) * weighted_loss(se_base, *weights, (1.0 - mw).clamp_min(0.0))
 
 
 class FamilyDriver:
@@ -244,6 +257,32 @@ class FamilyDriver:
         Returns (loss tensor, info dict e.g. {"t": 0.63}). Owns the family's noise/target/timestep rules."""
         raise NotImplementedError
 
+    def training_loss_batch(self, dit, latents, cond: dict, generator, *, min_t: float = 0.0, max_t: float = 1.0,
+                            loss_mask=None):
+        """Batch Size above 1 (description batch_training): latents (B, C, h, w) of one bucket, cond = the B pictures'
+        batch_cond dicts joined by stack_conds, loss_mask (B, 1, h, w) or None. Each picture draws its noise and
+        timestep in the order B training_loss calls would, so with the same generator the loss is the mean of
+        theirs. Returns (loss tensor, info dict with "t", the pictures' mean; "per", each picture's own loss (B,) as
+        its training_loss would give it (picture_losses), and "ts", each picture's t) - the per-image loss watch
+        weighs and records the pictures one by one from them."""
+        raise NotImplementedError
+
+    def stack_conds(self, conds: list):
+        """B pictures' batch_cond dicts (each batch 1) -> one dict with a batch of B, or None when their shapes
+        differ: the trainer then runs each shape's pictures as their own group. Nothing is padded, so a group trains
+        as its pictures would one at a time."""
+        import torch
+        keys = list(conds[0])
+        if any(list(c) != keys for c in conds):
+            return None
+        out = {}
+        for k in keys:
+            vs = [c[k] for c in conds]
+            if not all(torch.is_tensor(v) and v.shape == vs[0].shape for v in vs):
+                return None
+            out[k] = torch.cat(vs)
+        return out
+
     # ---- prompt-pair sliders (optional) ------------------------------------------------------------
     def slider_setup(self, group) -> None:
         """A slider run's data is known (an image-pair group, or a prompt slider's practice bank)."""
@@ -274,6 +313,44 @@ class FamilyDriver:
     def predict(self, dit, state: dict, cond: dict):
         """The model's prediction at a noise_latents() state for this conditioning (batched dict)."""
         raise NotImplementedError
+
+    def map_target(self, latents, state: dict):
+        """What predict() should return at this noise_latents() state - the training target, for the training maps'
+        per-pixel error. Default: flow matching (x_t = (1 - t) x0 + t noise, target noise - x0), recovered from the
+        state as (x_t - x0) / t. A family with another target overrides it."""
+        import torch
+        t = state["t"]
+        t = t.float().view(-1, *([1] * (latents.dim() - 1))).to(latents.device) if torch.is_tensor(t) else float(t)
+        return (state["xt"].float() - latents.float()) / t
+
+    def trigger_text(self, tokenizer, caption: str):
+        """For the trigger-word attention map (description.trigger_attention): (the prompt exactly as this family's
+        text encoder builds it around the caption, the leading part of it the encoder drops before the DiT sees the
+        text). The tokenizer is trigger_tokenizer()'s. None: no trigger map."""
+        return None
+
+    def trigger_tokenizer(self):
+        """The tokenizer whose pieces are the DiT's text keys, in its fast form (character offsets). Default: the
+        family's caption tokenizer (families/trigger_check)."""
+        from fizgig.families import trigger_check
+        return trigger_check.fast_tokenizer(self.description.key)
+
+    def trigger_key_positions(self, caption: str, word: str):
+        """The word's positions among the DiT's text keys (from where the text starts), [] when the caption doesn't
+        have it, None when the family has no trigger map. Default: trigger_text() through trigger_tokenizer(); a
+        family whose keys aren't its tokens one for one (SDXL's 77-token chunks) overrides it."""
+        tok = self.trigger_tokenizer()
+        built = self.trigger_text(tok, caption)
+        if built is None:
+            return None
+        from fizgig.training.attn_probe import trigger_positions
+        return trigger_positions(tok, built[0], built[1], caption, word)
+
+    def trigger_attention_hooks(self, dit):
+        """A context manager put around the trigger-word map's forward, for a model that needs hooks installed to
+        reach its attention (SDXL's diffusers UNet: its cross-attention processors). Default: nothing."""
+        import contextlib
+        return contextlib.nullcontext()
 
     # ---- sampling -------------------------------------------------------------------------------
     def initial_noise(self, seed: int, width: int, height: int):
@@ -349,6 +426,12 @@ class FamilyDriver:
         Default: as is."""
         return sd
 
+    def export_lora_state_dict(self, sd: dict) -> dict:
+        """The LoRA file's tensors as written for export - the inverse of convert_lora_state_dict. Fibo 2.0's ComfyUI
+        driver fuses the separate q/k/v (and w1/w3) projections back together here so the exported keys match the
+        ComfyUI checkpoint; default: as is."""
+        return sd
+
     def lora_target_names(self, dit) -> list:
         """Dotted module names (relative to dit) of the Linears a LoRA wraps: every module in the block map."""
         return [m for g in self.block_map(dit) for b in g.blocks for m in b.modules]
@@ -386,6 +469,14 @@ class FamilyDriver:
         from fizgig.families.ft import source_unfit_reason
         return source_unfit_reason(path)
 
+    def ft_load_mp(self, group):
+        """Megapixels the fine-tune plans its activations at: the run's largest bucket. A video family whose clips
+        cost by their token load (frames x area) returns that instead."""
+        try:
+            return max(k[-2] * k[-1] / 1e6 for ds in group.datasets for k in ds.batch_manager.bucket_resos)
+        except Exception:
+            return None
+
     def install_ft_streamer(self, dit, streamer) -> None:
         """Hand the fine-tune's block streamer to the model: it implements the block-swap interface the forward
         already calls (wait_for_block / submit_move_blocks_forward). The default suits the common
@@ -401,11 +492,12 @@ class FamilyDriver:
         dit.offloader = streamer
         dit.blocks_to_swap = 1
 
-    def frozen_file_added(self, dit, path: str, strength: float, role: str) -> None:
+    def frozen_file_added(self, dit, path: str, strength: float, role: str) -> int:
         """A frozen LoRA file (role "adapter": on for training, off in previews; "context": on for both; "speed": the
         preview speed LoRA, on for previews only) has been
         added to the family LoRA. A family whose LoRAs carry weights the family LoRA cannot wrap (H3's AdaLN rows on
-        the pruned base, injected at run time) applies them here."""
+        the pruned base, injected at run time) applies them here and returns how many it applied."""
+        return 0
 
     # ---- room beside the training model (preview decode, override encode) ----------------------------
     def park_for(self, dit, device, need_gb, purpose: str):
@@ -453,12 +545,19 @@ class FamilyDriver:
         why)."""
         return None
 
+    def plan_pictures(self, precision: str, blocks_to_swap: int, *, megapixels: float, pictures: int,
+                      run: dict) -> Optional[tuple]:
+        """A family with its own Auto plan (plan_run): that plan for pictures of `megapixels`, `pictures` a step,
+        with no dataset - (precision, blocks_to_swap) - for the Batch size note and a moved run's batch
+        (web/batch_plan). None: the shared plan over the description's train_memory."""
+        return None
+
     def nogc_load(self, group) -> tuple:
         """What the checkpointing-off figures are read at: (kind, megapixels). kind "" reads
         description.train_memory_nogc[precision], any other reads [f"{precision}:{kind}"]. Default: the largest
         bucket, as stills."""
         try:
-            return "", max(w * h / 1e6 for ds in group.datasets for (w, h) in ds.batch_manager.bucket_resos)
+            return "", max(k[-2] * k[-1] / 1e6 for ds in group.datasets for k in ds.batch_manager.bucket_resos)
         except Exception:
             return "", 1.0
 
@@ -480,13 +579,14 @@ class FamilyDriver:
         d = self.description
         if mode == "outside":
             return "outside", ""
+        pref, old = self._torch_boundary()
         if mode != "auto":
-            b, why = self._compile_fit(precision, mp, d.compile_boundary)
+            b, why = self._compile_fit(precision, mp, pref)
             if not b:                       # On still compiles: the leanest boundary, with a warning
                 return "outside", ("on: " + why.replace(" - running uncompiled", "") +
                                    " - compiling with the checkpoint outside the graph anyway (it may run out of "
                                    "memory; Off or Auto avoid that)")
-            return b, (why if b != d.compile_boundary else "")
+            return b, "; ".join(w for w in (old, why if b != pref else "") if w)
         from fizgig.utils.capabilities import compile_blocker
         blocked = compile_blocker(blocks_to_swap)
         if blocked:
@@ -498,11 +598,26 @@ class FamilyDriver:
         if total_steps < pay:
             return False, (f"{total_steps} steps on the {precision.upper()} path — compile pays back after ~{pay}, "
                            "so this run is quicker uncompiled")
-        b, fit = self._compile_fit(precision, mp, d.compile_boundary)
+        b, fit = self._compile_fit(precision, mp, pref)
         if not b:
             return False, fit
         return b, (f"{total_steps} steps on the {precision.upper()} path — compile pays back within ~{pay} steps and "
-                   f"this run is longer" + (f"; {fit}" if fit else ""))
+                   f"this run is longer" + "".join(f"; {w}" for w in (old, fit) if w))
+
+    def _torch_boundary(self):
+        """(boundary, why): the description's, except "inside" on a PyTorch older than compile_inside_min_torch, which
+        keeps the checkpoint outside (the old memory)."""
+        d = self.description
+        need = d.compile_inside_min_torch
+        if d.compile_boundary != "inside" or not need:
+            return d.compile_boundary, ""
+        import torch
+        have = tuple(int(p) for p in torch.__version__.split("+")[0].split(".")[:2])
+        if have >= tuple(int(p) for p in need.split(".")[:2]):
+            return "inside", ""
+        return "outside", (f"PyTorch {torch.__version__.split('+')[0]} is older than {need}, so the checkpoint stays "
+                           f"outside the compiled blocks (inside needs more memory on it) - run the updater for "
+                           f"PyTorch {need}")
 
     def _compile_fit(self, precision, mp, preferred):
         """(boundary, why) by the description's measured compiled peaks (compile_memory) against free VRAM: the

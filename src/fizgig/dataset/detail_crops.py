@@ -20,7 +20,8 @@ SETTINGS = "fizgig_detail_crops.json"   # its switch, in the training folder (fi
 MANIFEST = ".crops.json"               # per size folder: each crop's source picture and box
 MASTERS = "detail_masters"              # Train on the crops only: the full pictures, kept here and not trained
 PICS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
-RULE = 3                                # the spot rule's version: a crop made by an older one is made again
+RULE = 4                                # the spot rule's version: a crop made by an older one is made again
+                                        # (4: a see-through picture's crops keep its alpha; the spot is unchanged)
 FLAT = 0.4                              # a spot with under 40% of the detail of the picture's busiest spot counts as flat
 
 
@@ -251,11 +252,13 @@ def to_caption(folder, ext=".txt"):
 
 
 def make(folder, mp, log=print, ext=".txt"):
-    """The crops for one size, made where missing or out of date (the picture changed). A picture smaller than the
-    crop has none (it trains whole). A crop whose picture left the folder goes, with its caption. Returns the crops with
-    no caption yet."""
+    """The crops for one size, made where missing or out of date (the picture or its mask changed, or the mask was
+    added or deleted). A picture smaller than the crop has none (it trains whole), and an old crop of it goes with its
+    mask crop and caption. A crop whose picture left the folder goes, with its caption. Returns the crops with no
+    caption yet."""
     from PIL import Image
     from fizgig.dataset.masks import mask_for_stem
+    from fizgig.utils.image import flatten
     from fizgig.utils.upright import open_upright
     s = side(mp)
     out = size_dir(folder, mp)
@@ -282,10 +285,18 @@ def make(folder, mp, log=print, ext=".txt"):
         src = source(folder, n)                            # its full-size original when Image Prep kept one
         mt = os.path.getmtime(src)
         dst = os.path.join(out, stem + ".png")
-        if man.get(stem, {}).get("mtime") == mt and man[stem].get("rule") == RULE and os.path.isfile(dst):
+        mk = mask_for_stem(picture_dir(folder, n), stem)
+        try:
+            mk_mt = os.path.getmtime(mk) if mk else None   # the mask counts too: edited, added or deleted
+        except OSError:
+            mk, mk_mt = None, None
+        old = man.get(stem, {})
+        if old.get("mtime") == mt and old.get("mask", "?") == mk_mt and old.get("rule") == RULE and os.path.isfile(dst):
             continue
         try:
-            im = open_upright(src).convert("RGB")
+            im = open_upright(src)
+            im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info else \
+                im.convert("RGB")
         except Exception as e:
             log(f"[detail crops] {n}: can't read it ({e})")
             continue
@@ -293,12 +304,21 @@ def make(folder, mp, log=print, ext=".txt"):
         if min(w, h) < s:                                  # smaller than the crop: it trains whole, no crop
             skipped += 1
             man.pop(stem, None)
+            for gone in (dst, os.path.join(out, stem + "-masklabel.png"), os.path.join(out, stem + ext)):
+                try:                                       # an older, bigger picture's crop must not train
+                    os.remove(gone)
+                except OSError:
+                    pass
             continue
-        gray = im.convert("L")
+        gray = flatten(im).convert("L")         # a see-through picture as seen on white
         gray.thumbnail((256, 256))
         x, y = spot(*centre(stem, w, h, gray), w, h, s)
         im.crop((x, y, x + s, y + s)).save(dst)
-        mk = mask_for_stem(picture_dir(folder, n), stem)
+        if not mk:                                         # no mask now: an old mask crop goes
+            try:
+                os.remove(os.path.join(out, stem + "-masklabel.png"))
+            except OSError:
+                pass
         if mk:                                             # masked training: the mask cut at the same spot
             try:
                 m = Image.open(mk)
@@ -312,7 +332,7 @@ def make(folder, mp, log=print, ext=".txt"):
                 os.remove(os.path.join(out, stem + ext))
             except OSError:
                 pass
-        man[stem] = {"mtime": mt, "box": [x, y, s], "source": n, "rule": RULE}
+        man[stem] = {"mtime": mt, "mask": mk_mt, "box": [x, y, s], "source": n, "rule": RULE}
         made += 1
     with open(mpath, "w", encoding="utf-8") as f:
         json.dump(man, f)

@@ -21,7 +21,7 @@ You don't edit the GUI, the trainer or the tools. If your model needs something 
 
 ## Before you start: open a Discussion
 
-Adding a model (or fine-tuning for a model Fizgig already has) starts with a post in the repo's [New models & fine-tuning](https://github.com/shootthesound/Fizgig/discussions/new?category=new-models-fine-tuning) discussions, before any code: which model, where its weights and reference implementation live, and what you plan to support. Discussions are for that only; bugs, questions and feature requests go in [Issues](https://github.com/shootthesound/Fizgig/issues). It's a prerequisite for a model pull request. It lets us agree the scope, avoids two people building the same model, and gets you answers about the driver system early.
+Adding a model (or fine-tuning for a model Fizgig already has, or a captioner: see [Adding a captioner](../ADDING_A_CAPTIONER.md)) starts with a post in the repo's [New models & fine-tuning](https://github.com/shootthesound/Fizgig/discussions/new?category=new-models-fine-tuning) discussions, before any code: which model, where its weights and reference implementation live, and what you plan to support. Discussions are for that only; bugs, questions and feature requests go in [Issues](https://github.com/shootthesound/Fizgig/issues). It's a prerequisite for a model pull request. It lets us agree the scope, avoids two people building the same model, and gets you answers about the driver system early.
 
 ## The guides
 
@@ -82,7 +82,7 @@ Repair Studio and Royale share one engine (`WorkbenchEngine`):
 - **Load:** the same base-model load as training (forward only), `load_vae`, the LoRA over `lora_target_names`, and the preview speed LoRA if the family has one.
 - **Sliders:** one per block in `block_map(dit)`; `block_of(module)` maps each LoRA module to its slider.
 - **Prompts:** `load_text_encoder` → `encode_text` (or `encode_text_with_image` / `encode_text_with_references`, by the family's reference kind) → `unload_text_encoder`. Encodings are cached per prompt.
-- **Render:** `generate(dit, cond, w, h, steps=, seed=, cfg=, sigmas=, options=, noise=, on_step=)` → `decode(...)`. `on_step(done, total)` must be called before every step; it raises to cancel and drives Turbo Preview.
+- **Render:** `generate(dit, cond, w, h, steps=, seed=, cfg=, sigmas=, options=, noise=, on_step=)` → `decode(...)`. `on_step(done, total)` must be called before every step; it raises to cancel and drives Reuse unchanged blocks.
 - **Seed travel** blends two `initial_noise(seed, w, h)` starts. **Prompt travel** needs `pad_conditioning(conds)`; without it the family simply has no prompt travel.
 - **Save Repaired** bakes the live sliders into a new LoRA in your key format.
 

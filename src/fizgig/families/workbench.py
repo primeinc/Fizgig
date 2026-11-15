@@ -20,7 +20,7 @@ Model EQ: a LoRA made from the model's own weights (scripts/extract_model_lora.p
 each block's slider s to (s - 1) x its gain - 1.0 and an unticked block are the stock model. Primary, donor or in a
 mix alike; a save bakes the mapped strengths into an ordinary LoRA without the marker.
 
-Turbo Preview (description.activation_cache, switched by the tab's tick through `turbo_preview`): a slider-only change
+Reuse unchanged blocks (description.activation_cache, switched by the tab's tick through `turbo_preview`): a slider-only change
 replays the blocks before the earliest changed one from the last render (families/act_cache.py).
 
 A LoRA's load strength (state.primary_scale / donor_scale) scales the whole file and every block slider is relative
@@ -63,6 +63,7 @@ def model_eq_gain(path):
 EPOCH = "epoch_"                    # + the epoch number: one adapter per blended epoch (the primary keeps PRIMARY)
 
 from fizgig.families.epochs import _EPOCH_RE, ema_weights, run_epochs   # noqa: F401 (the workbench's own names)
+from fizgig.utils.image import flatten
 from fizgig.utils.upright import upright
 
 
@@ -141,7 +142,7 @@ class WorkbenchEngine:
         self._cancel_event = threading.Event()
         self.on_step = None                 # (done, total) per denoising step, from the render thread
         self._baseline_key = self._baseline_img = None
-        # Turbo Preview: the activation cache (families/act_cache.py) when the description offers one and the tab's
+        # Reuse unchanged blocks: the activation cache (families/act_cache.py) when the description offers one and the tab's
         # tick is on
         self._turbo_enabled = False
         self._act = None
@@ -495,7 +496,7 @@ class WorkbenchEngine:
     def mark_blocks_changed(self, blocks):
         pass                                # the activation cache compares slider values itself
 
-    # ---- Turbo Preview ------------------------------------------------------------------------------
+    # ---- Reuse unchanged blocks ------------------------------------------------------------------------------
     @property
     def turbo_preview(self):
         return bool(self._turbo_enabled and getattr(self.desc, "activation_cache", False))
@@ -541,13 +542,14 @@ class WorkbenchEngine:
             mp = 1.0
         return (path, mp) if path and os.path.isfile(path) else ("", 1.0)
 
-    @staticmethod
-    def _fit_reference(path, width, height):
-        """An edit reference as uint8 (H, W, 3), cropped and scaled to the preview's size."""
+    def _fit_reference(self, path, width, height):
+        """An edit reference as uint8 (H, W, 3), or (H, W, 4) with its transparency, as training takes it, cropped and
+        scaled to the preview's size."""
         import numpy as np
         from PIL import Image, ImageOps
+        from fizgig.families.train import _as_trained
         with Image.open(path) as im:
-            return np.array(ImageOps.fit(upright(im).convert("RGB"), (int(width), int(height)), Image.LANCZOS))
+            return np.array(ImageOps.fit(_as_trained(upright(im), self.desc.rgba), (int(width), int(height)), Image.LANCZOS))
 
     def _reference_latents(self, path, width, height):
         """The edit reference's latents (CPU, batch dim), cached per picture and size."""
@@ -588,7 +590,7 @@ class WorkbenchEngine:
                     if kind == "vision":
                         from PIL import Image
                         with Image.open(ref) as im:
-                            conds = self.driver.encode_text_with_image(te, list(need), upright(im).convert("RGB"),
+                            conds = self.driver.encode_text_with_image(te, list(need), flatten(upright(im)),
                                                                        megapixels=ref_mp)
                     elif kind == "edit":
                         pic = self._fit_reference(ref, *size)
@@ -795,7 +797,7 @@ class WorkbenchEngine:
                         lat = _generate()
                 except torch.OutOfMemoryError:
                     # the cache's share of the card was the difference: give it back and render plainly
-                    logger.warning("Turbo Preview: out of memory with the cache - rendering without it")
+                    logger.warning("Reuse unchanged blocks: out of memory with the cache - rendering without it")
                     self._invalidate_activation_cache()
                     act = None
                     lat = _generate()
@@ -812,7 +814,7 @@ class WorkbenchEngine:
             except torch.OutOfMemoryError:
                 if self._act is None or not self._act.out:
                     raise
-                logger.warning("Turbo Preview: out of memory decoding beside the cache - cache dropped")
+                logger.warning("Reuse unchanged blocks: out of memory decoding beside the cache - cache dropped")
                 self._invalidate_activation_cache()
                 out = self.driver.decode(self.vae, lat, width, height)
             if source is not None and self.source_repaint is not None:
@@ -1079,6 +1081,8 @@ class WorkbenchEngine:
             if combined:
                 metadata["ss_repair_studio_combined_ranks"] = json.dumps(dict(sorted(combined.items())),
                                                                          separators=(",", ":"))
+        if self.desc.lora.save_fused:
+            sd = self.driver.export_lora_state_dict(sd)
         save_file(sd, out_path, metadata=metadata)
         kept = {self.driver.block_of(m) for m in ranks}
         dropped = sorted((self.primary_block_ids - kept) - blended)
@@ -1092,6 +1096,143 @@ class WorkbenchEngine:
                 "strengths_baked": bool(blended)}
 
     # ---- teardown -----------------------------------------------------------------------------------
+    MAP_LEVELS = (0.25, 0.5, 0.75)
+    MAP_CAT_LABELS = {"style_composition": "Style + composition", "style_ident_overlap": "Style / identity",
+                      "identity": "Identity", "ident_details_overlap": "Identity / detail", "details": "Details"}
+
+    def map_groups(self):
+        """The Blocks map's groups: [(label, [block ids])] over the blocks the primary LoRA touches. Runs of
+        consecutive blocks in one category of the family's charted block map (description.block_categories: Identity,
+        Details...), else in one section of its block map, each run cut to at most 8 blocks (12 for a named category,
+        so Identity stays whole); a section of its own (a text fusion stack) stays one group."""
+        cats = dict(getattr(self.desc, "block_categories", None) or ())
+        touched = set(self.primary_block_ids or ())
+        num = lambda bid: (re.findall(r"\d+", str(bid)) or [""])[-1]
+        out = []
+        for g in self.block_groups():
+            runs, cur, key = [], [], None
+            for b in g.blocks:
+                k = cats.get(b.id)
+                if cur and k != key:
+                    runs.append((key, cur))
+                    cur = []
+                key = k
+                cur.append(b.id)
+            if cur:
+                runs.append((key, cur))
+            for k, ids in runs:
+                named = k in self.MAP_CAT_LABELS
+                most = 12 if named else 8
+                n = -(-len(ids) // most)
+                size = -(-len(ids) // n)
+                for i in range(0, len(ids), size):
+                    part = ids[i:i + size]
+                    if touched and not (set(part) & touched):
+                        continue
+                    a, z = num(part[0]), num(part[-1])
+                    span = f" {a}" if a == z else f" {a}–{z}"
+                    # the section's own name where block numbers restart in it (Klein's double / single blocks)
+                    sec = g.label.replace(" blocks", "").replace("Blocks", "").strip()
+                    if not named and len(g.blocks) <= 8:
+                        label = g.label                          # a small section: one group, its own name
+                    elif named:
+                        label = self.MAP_CAT_LABELS[k] + (f" · {sec.lower()}" if sec else "") + span
+                    else:
+                        label = (sec or "Blocks") + span
+                    out.append((label, part))
+        return out
+
+    @torch.no_grad()
+    def lora_map(self, state, picture, trigger="", seed=1234, blocks=False):
+        """Studio's maps over a render (the training maps' method on any loaded LoRA): the picture encoded, noised at
+        three fixed levels with fixed noise, and the model's prediction compared -
+          "effect": the LoRA as tweaked against no LoRA - where the LoRA acts;
+          "tweak":  as tweaked against the baseline (every slider at 1.0) - where the slider changes act (absent when
+                    nothing moved);
+          "attn":   the trigger word's share of each picture area's attention (a family with trigger_attention and the
+                    trigger in the prompt).
+          "blocks": with blocks=True, at mid noise only - {group label: grid}: each map_groups() group's part,
+                    as tweaked against the same with that group's blocks off.
+        -> {"levels": [...], "maps": {kind: {level: grid}}, "blocks": {label: grid}, "groups": [labels],
+        "trigger": the word, "trigger_found": bool}. Stills only."""
+        import copy
+        import numpy as np
+        from fizgig.training import attn_probe
+        from fizgig.training.train_maps import _grid, to_map
+        self._sync_epochs()
+        if self.lowmem:
+            self._park_dit("cpu")
+            self.vae.to(self.device)
+        try:
+            z = self.driver.encode_images(self.vae, [np.asarray(picture.convert("RGB"))])[0]
+        finally:
+            if self.lowmem:
+                self.vae.to("cpu")
+                self._park_dit(self.device)
+        latents = z[None].to(self.device)
+        c = self.encode([state.prompt])[0]
+        cond = {k: (v[None].to(self.device) if torch.is_tensor(v) else v) for k, v in c.items()}
+        off = copy.deepcopy(state)
+        off.primary_scale, off.donor_scale = 0.0, 0.0
+        base = None
+        if not self.same_as_baseline(state):
+            base = self.default_state(state.preview_width, state.preview_height)
+            base.primary_scale, base.donor_scale = float(getattr(state, "primary_scale", 1.0)), 0.0
+            for bs in base.blocks.values():
+                bs.donor_enabled = False
+        word = str(trigger or "").strip()
+        pos = None
+        if word and getattr(self.desc, "trigger_attention", False):
+            try:
+                pos = self.driver.trigger_key_positions(state.prompt, word) or None
+            except Exception:
+                logger.debug("[maps] trigger positions", exc_info=True)
+        out = {"effect": {}, "tweak": {}, "attn": {}}
+        groups = self.map_groups() if blocks else []
+        block_maps = {}
+        was = self.dit.training if isinstance(self.dit, torch.nn.Module) else None
+        if was:
+            self.dit.eval()
+        try:
+            for i, t in enumerate(self.MAP_LEVELS):
+                g = torch.Generator().manual_seed(int(seed) * 1000003 + i)
+                st = self.driver.noise_latents(latents, g, min_t=t, max_t=t)
+                self.apply_state(state)
+                if pos:
+                    stance = (torch.compiler.set_stance("force_eager") if hasattr(torch.compiler, "set_stance")
+                              else __import__("contextlib").nullcontext())
+                    with stance, self.driver.trigger_attention_hooks(self.dit), attn_probe.capturing(pos) as probe:
+                        pred = self.driver.predict(self.dit, st, cond).float()
+                    a = probe.result()
+                    if a is not None:
+                        out["attn"][f"{t:g}"] = _grid(to_map(a[""][None, :, None], latents))
+                else:
+                    pred = self.driver.predict(self.dit, st, cond).float()
+                self.apply_state(off)
+                p_off = self.driver.predict(self.dit, st, cond).float()
+                out["effect"][f"{t:g}"] = _grid(to_map((pred - p_off).abs(), latents))
+                if base is not None:
+                    self.apply_state(base)
+                    p_base = self.driver.predict(self.dit, st, cond).float()
+                    out["tweak"][f"{t:g}"] = _grid(to_map((pred - p_base).abs(), latents))
+                if blocks and abs(t - 0.5) < 1e-6:       # each group's part: everything as tweaked, minus that group
+                    for label, ids in groups:
+                        less = copy.deepcopy(state)
+                        for bid in ids:
+                            if bid in less.blocks:
+                                less.blocks[bid].primary_enabled = False
+                        self.apply_state(less)
+                        p_less = self.driver.predict(self.dit, st, cond).float()
+                        block_maps[label] = _grid(to_map((pred - p_less).abs(), latents))
+                        del p_less
+                del st, pred, p_off
+        finally:
+            self.apply_state(state)                 # the sliders as they are, for the next render
+            if was:
+                self.dit.train()
+        return {"levels": [f"{t:g}" for t in self.MAP_LEVELS], "maps": {k: v for k, v in out.items() if v},
+                "blocks": block_maps, "groups": [g for g, _ in groups], "trigger": word, "trigger_found": bool(pos)}
+
     def forget_prompts(self):
         """Drop the cached prompt conditioning (a new prompt was applied)."""
         self._prompt_cache.clear()

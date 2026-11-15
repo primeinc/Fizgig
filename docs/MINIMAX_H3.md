@@ -57,13 +57,9 @@ The Optimizer Type dropdown also offers full-precision **adamw**, which measured
 
 ## Training adapter
 
-A frozen LoRA rides at full strength on every training step, so the gradient goes into your subject rather than into undoing H3's guidance distillation. It is off for previews and never written into your LoRA. The **Training adapter** dropdown picks which one:
+A frozen LoRA rides at full strength on every training step, so the gradient goes into your subject rather than into undoing H3's guidance distillation. It is off for previews and never written into your LoRA. The adapter is [@ostris](https://github.com/ostris)'s ([training adapter](https://huggingface.co/ostris/minimax_h3_training_adapter)), in two files: an fl2va run gets the fl2va one and a ref2va run gets the ref2va one, picked from your Training Base.
 
-- **Circlestone** ([circlestone-labs](https://huggingface.co/circlestone-labs/MiniMax-H3-Image-Training-Adapter)) is the default and the one for photos. In A/Bs on the same data it trained sharper, cleaner LoRAs that follow the prompt better. One file serves both the fl2va and ref2va bases.
-- **Ostris** ([@ostris](https://github.com/ostris), [training adapter](https://huggingface.co/ostris/minimax_h3_training_adapter)) is the one for videos: on a video-only style run it learned the look about three times faster. The Training tab suggests it when it sees a clips-only dataset. It comes as fl2va and ref2va files; the one matching your Training Base is used. Against no adapter, with likeness mode on, it reached 50% likeness seven epochs sooner and peaked higher, and its best window arrives earlier, so watch the gallery.
-- **Off** trains without one.
-
-For a mixed dataset, choose by whether the photos or the videos are the priority. The updater and the Preferences download buttons fetch the adapter files. The adapter used is recorded in the output metadata. It also rides under full fine-tuning (forward hooks, on by default, never in the checkpoint); see [FINETUNE.md](FINETUNE.md).
+The updater and the Preferences download buttons fetch the adapter files. The adapter used is recorded in the output metadata. It also rides under full fine-tuning (forward hooks, on by default, never in the checkpoint); see [FINETUNE.md](FINETUNE.md).
 
 ## Context LoRA
 
@@ -89,8 +85,7 @@ Each has a **Download link on its row in Preferences**:
 | Audio VAE *(optional)* | ~605 MB | Sound training and previews with sound |
 | Turbo LoRA *(optional)* | ~780 MB | 6-step previews, `minimax_h3_turbo_v4_step600.safetensors` from [larryvrh/MiniMax-H3-Turbo-Lora](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora); you may already have it in ComfyUI's loras folder |
 | DiT — reference *(optional)* | ~21 GB | Only for reference distillation (`ref2va`) |
-| Training adapter (Circlestone) | ~620 MB | The default training adapter, one file for both bases |
-| Training adapter (Ostris) *(optional)* | ~155 MB each | fl2va and ref2va files, used when the dropdown says Ostris |
+| Training adapter (fl2va, ref2va) | ~310 MB each | Ostris's, one per base; the one matching your Training Base is used |
 
 **You train on the pruned file.** "Pruned" here swaps the AdaLN modulation MLP for a curve table. That branch only sees the timestep, so nothing a LoRA learns lives there: you train against the exact weights you deploy on.
 
@@ -107,6 +102,7 @@ Every control has a hint in the app; the ones worth knowing:
 - **Reference distillation** (experimental): teaches the LoRA to render your subject from the trigger word the way H3 renders them from a *photo*. Each image is marked against the model shown *other* photos of the same person, so identity is learned without the scenery. Needs the ref2va model; the LoRA deploys on the ordinary model. **Identity-first** (Auto) trains a teacher-only first phase, then pure photos. It is its own tick; Multi Concept does not switch it on.
 - **More than one subject** (the Training tab's Subjects card, "Who is this LoRA of?"): two subjects, two folders, two trigger words, one LoRA. Each subject's images are only compared against their own. Picking it changes nothing else: caption dropout stays as you set it (in our A/B, one folder *with* dropout beat two without). Separation rests on the trigger words.
 - **Adapter-relative LR** (default Off): the LR box becomes a ceiling the run climbs toward, keeping each step proportional to the adapter's size. Worth trying when a run overshoots early.
+- **Masked training** (off by default): tick **Train on the parts your masks show** and every photo's loss is weighted per cell - white trains fully, grey partly, black only as much as **How much outside the mask counts** says (0.1 recommended). The photo still trains whole, so the LoRA sees your subject in their scene; it just stops copying the scene. Make the masks on the Image Prep tab, or paint your own beside each picture (`photo.jpg` -> `photo-masklabel.png`). Photos only: clips and voice recordings train exactly as they did, since the dataset gives a mask to a still alone. With **Outside the mask, keep the model's own picture (prior preservation)** on, each masked step makes one extra pass through the model with the LoRA switched off and teaches the LoRA to give the base model's own answer outside the mask, so backgrounds and the model's look stay the model's. A run that also distills takes the mask on its ordinary steps only: a distill step trains on the model's own picture, not on the photograph. [Masked training](MASKED_TRAINING.md)
 - **Caption dropout** (default 0.05): leave it on.
 - **Weight averaging (EMA)** (default 0.98): checkpoints and previews are saved from a running average of the adapter's recent steps rather than whichever step the epoch ended on, so every checkpoint reflects the whole dataset instead of the tail of the shuffle. On a four-way A/B at 50 epochs, 0.98 sat five likeness points above EMA-off on the late epochs with half the epoch-to-epoch spread, and reached 50% just as fast. 0.99 smooths more without lifting the level; 0.995 lags and is for runs of a few hundred epochs only. Off is there for an A/B.
 - **Using the Turbo LoRA in ComfyUI? Skip its custom sampler.** ComfyUI samples H3 audio cleanly with stock Euler; community consensus is 8 steps, with `minimax_h3_turbo_v4_step600_ema` the strongest checkpoint.

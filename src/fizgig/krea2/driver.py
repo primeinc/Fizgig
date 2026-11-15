@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from fizgig.families.driver import Block, BlockGroup, FamilyDriver, prior_base, weighted_loss, with_prior
+from fizgig.families.driver import Block, BlockGroup, FamilyDriver, picture_losses, prior_base, weighted_loss, with_prior
 
 DTYPE = torch.bfloat16
 _BLOCK_MODULES = ("attn.wq", "attn.wk", "attn.wv", "attn.gate", "attn.wo", "mlp.gate", "mlp.up", "mlp.down")
@@ -48,6 +48,17 @@ class Krea2Driver(FamilyDriver):
 
     def compile_targets(self, dit):
         return dit.blocks
+
+    def compile_blocks(self, dit, boundary="inside", blocks_to_swap=0):
+        """The shared compile, then the attention stops trimming to each sequence's own length (it would recompile
+        every block for every new length; krea2/attention.py COMPILED_BLOCKS)."""
+        super().compile_blocks(dit, boundary=boundary, blocks_to_swap=blocks_to_swap)
+        import torch
+        from fizgig.krea2 import attention as _attn
+        if any(isinstance(b, torch._dynamo.eval_frame.OptimizedModule)
+               or isinstance(getattr(b, "block", None), torch._dynamo.eval_frame.OptimizedModule)
+               for b in self.compile_targets(dit)):
+            _attn.COMPILED_BLOCKS = True
 
     def compile_plan(self, mode, total_steps, precision, blocks_to_swap, mp=0.25):
         """Krea 2's own measured rule (utils/capabilities: should_compile / compile_boundary) - its compiled-memory
@@ -185,9 +196,11 @@ class Krea2Driver(FamilyDriver):
         with torch.autocast(device_type=device.type, dtype=DTYPE):
             return dit(img=img, context=txt, t=t.to(DTYPE), pos=pos, mask=mask)
 
-    def loss_at(self, dit, latents, noise, t, cond, *, diff_ref=None, diff_weight=0.0, loss_mask=None, prior=None):
+    def loss_at(self, dit, latents, noise, t, cond, *, diff_ref=None, diff_weight=0.0, loss_mask=None, prior=None,
+                per=False):
         """The training loss for a given latent, noise and t - the original compute_loss's arithmetic, in the same
-        dtype order. training_loss draws noise and t; tests call this directly to compare with the original."""
+        dtype order. training_loss draws noise and t; tests call this directly to compare with the original. per:
+        each picture's own loss, (B,) (training_loss_batch)."""
         from fizgig.krea2.sampling import patchify_block
         patch = dit.config.patch
         latent = latents.to(dtype=DTYPE)
@@ -210,6 +223,8 @@ class Krea2Driver(FamilyDriver):
         mw = None
         if loss_mask is not None:                                  # a token's weight: its patch's average
             mw = patchify_block(loss_mask.to(latent.device).float(), patch)[0].mean(dim=-1)
+        if per:
+            return picture_losses((pred.float() - target.float()).pow(2).mean(dim=-1), w, mw)
         if w is None and mw is None:
             return F.mse_loss(pred.float(), target.float())
         loss = weighted_loss((pred.float() - target.float()).pow(2).mean(dim=-1), w, mw)
@@ -229,6 +244,20 @@ class Krea2Driver(FamilyDriver):
                             loss_mask=loss_mask, prior=prior)
         return loss, {"t": float(t.mean())}
 
+    def training_loss_batch(self, dit, latents, cond, generator, *, min_t=0.0, max_t=1.0, loss_mask=None):
+        """Batch Size above 1: each picture's noise and t drawn as training_loss draws them, picture by picture, then
+        one loss_at over the batch. Captions stack as encoded (512 tokens + validity mask each); _text gathers each
+        one's valid tokens and pads to the batch's longest with a mask, as the shared attention expects."""
+        patch = dit.config.patch
+        n_tokens = (latents.shape[-2] // patch) * (latents.shape[-1] // patch)
+        noises, ts = [], []
+        for i in range(latents.shape[0]):
+            noises.append(torch.randn(latents[i:i + 1].shape, generator=generator))
+            ts.append(self._sample_t(n_tokens, generator, min_t, max_t))
+        t = torch.cat(ts)
+        per = self.loss_at(dit, latents, torch.cat(noises), t, cond, loss_mask=loss_mask, per=True)
+        return per.mean(), {"t": float(t.mean()), "per": per, "ts": [float(v) for v in t]}
+
     def noise_latents(self, latents, generator, *, min_t=0.0, max_t=1.0):
         patch = 2
         n_tokens = (latents.shape[-2] // patch) * (latents.shape[-1] // patch)
@@ -237,8 +266,21 @@ class Krea2Driver(FamilyDriver):
         t_ = t.view(-1, 1, 1, 1).to(DTYPE)
         return {"xt": (1.0 - t_) * latents.to(DTYPE) + t_ * noise, "t": t}
 
+    def map_target(self, latents, state):
+        """The target in predict()'s layout (training maps): noise - x0, patchified as loss_at does."""
+        from fizgig.krea2.sampling import patchify_block
+        t = state["t"].float().view(-1, 1, 1, 1).to(latents.device)
+        return patchify_block((state["xt"].float() - latents.float()) / t, 2)[0]
+
     def predict(self, dit, state, cond):
         return self._forward(dit, state["xt"], state["t"], cond)
+
+    def trigger_text(self, tokenizer, caption):
+        """The encoder's system + user prefix (dropped: its 34 tokens never reach the DiT), the caption, the suffix
+        (krea2/embedder.py: prompt_template_encode_prefix / _suffix)."""
+        from fizgig.krea2.caption_text import ENCODE_SYSTEM_DESCRIPTOR
+        prefix = "<|im_start|>system\n" + ENCODE_SYSTEM_DESCRIPTOR + "<|im_end|>\n<|im_start|>user\n"
+        return prefix + caption + "<|im_end|>\n<|im_start|>assistant\n", prefix
 
     # ---- sampling (sampling.sample, split at the decode) ----------------------------------------
     @staticmethod

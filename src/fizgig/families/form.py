@@ -33,10 +33,14 @@ EMA = ("Off", "0.98 (recommended)", "0.99 (stronger)", "0.995 (long runs only)")
 EMA_SHORT = "Short run (window = ¼ of the run)"
 EMA_HINT = ("Saves and previews a running average of the LoRA instead of its latest step: smoother, less overbaked. "
             "0.98 averages over roughly the last 50 steps.")
-SIZES = ("512", "640", "768", "1024", "1280", "1536")
+SIZES = ("512", "640", "768", "1024", "1280", "1536", "2048")
 KINDS = (("standard", "Standard LoRA"), ("edit", "Edit (original + edited photo pairs)"),
          ("slider", "Slider (a dial between two looks)"), ("finetune", "Fine-tune the whole model"))
 FT_REG_MULT = ("0.05", "0.1", "0.2", "0.3", "0.5", "0.75", "1.0")
+# the Subjects card's Regularisation dataset (a LoRA's): how much of its folder each epoch uses
+REG_MATCH = "Match my training pictures"
+REG_USES = (REG_MATCH, "10%", "25%", "50%", "75%", "100%")
+REG_FOLD = "Regularisation dataset (optional)"
 CAPTION_DROPOUTS = ("Off", "0.05", "0.10 (strong)")
 # rows that belong together, drawn as one box each on the Training tab (app.js renderSection): the box sits where its
 # first row is, its rows side by side, their hints behind its ?
@@ -46,6 +50,18 @@ ROW_GROUPS = (
     ("length", "Length", ("MAX_TRAIN_EPOCHS", "SEED")),
     ("size", "Picture size", ("DATASET_MEGAPIXELS", "CLIP_MEGAPIXELS", "STAGE_MP", "STAGE_UNTIL")),
     ("context", "Context LoRA", ("CONTEXT_LORA_PATH", "CONTEXT_LORA_STRENGTH")),
+    ("states", "Save state", ("SAVE_STATE", "SAVE_STATE_ON_TRAIN_END", "KEEP_LAST_N_STATES")),
+    ("gradients", "Gradients", ("GRADIENT_ACCUMULATION", "MAX_GRAD_NORM")),
+    ("schedule", "Learning-rate schedule", ("LR_SCHEDULER", "LR_WARMUP_STEPS")),
+    ("buckets", "Buckets", ("ENABLE_BUCKET", "BUCKET_NO_UPSCALE")),
+    ("metadata", "Metadata (saved in the LoRA)", ("METADATA_TITLE", "METADATA_AUTHOR", "METADATA_DESCRIPTION",
+                                                  "METADATA_LICENSE", "METADATA_TAGS", "METADATA_TRIGGER_PHRASE",
+                                                  "METADATA_THUMBNAIL")),
+    ("previewsize", "Preview size", ("SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS", "SAMPLE_SEED")),
+    ("turbo", "Turbo LoRA", ("FAMILY_TURBO_ON", "FAMILY_TURBO_STRENGTH")),
+    ("rotations", "Rotations", ("FAMILY_FT_ROTATIONS", "FAMILY_FT_SAVE_EVERY", "FAMILY_FT_ROTATE_EVERY")),
+    ("reg", "Regularisation", ("FAMILY_FT_REG_DIR", "FAMILY_FT_REG_MULT")),
+    ("elementboost", "Element boost (experimental)", ("FACE_BOOST", "FACE_BOOST_AREA")),
 )
 STAGE_MPS = ("Off", "0.25", "0.37", "0.5", "0.75")
 STAGE_UNTILS = ("20%", "30%", "50%")
@@ -70,7 +86,7 @@ DEFAULTS = {
     "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": "8", "MAX_TRAIN_EPOCHS": "12", "SAVE_EVERY_N_EPOCHS": "1",
     "SAVE_LATER": False, "SAVE_UNTIL_EPOCH": "10", "SAVE_EVERY_AFTER": "1",
     "SEED": "42", "BLOCKS_SWAP": "Auto (detect from GPU)", "RESUME_TRAINING": "", "OPTIMIZER_TYPE": "adamw8bit",
-    "OPTIMIZER_ARGS": "", "GRADIENT_ACCUMULATION": "1", "MAX_GRAD_NORM": "1.0", "LR_SCHEDULER": "constant",
+    "OPTIMIZER_ARGS": "", "GRADIENT_ACCUMULATION": "1", "BATCH_SIZE": "1", "MAX_GRAD_NORM": "1.0", "LR_SCHEDULER": "constant",
     "LR_WARMUP_STEPS": "", "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
     "CONTEXT_LORA_PATH": "", "CONTEXT_LORA_STRENGTH": "1.0", "FAMILY_DOP": False, "FAMILY_MULTI_PERSON": False, "FAMILY_DOP_TRIGGER": "",
     "FAMILY_DOP_CLASS": "", "FAMILY_DOP_TRIGGER2": "", "FAMILY_DOP_CLASS2": "",
@@ -94,8 +110,9 @@ DEFAULTS = {
     "FAMILY_SLIDER_ANCHOR_WEIGHT": "1", "FAMILY_SLIDER_ULTRA": False,
     "FAMILY_FT_ROTATIONS": "10", "FAMILY_FT_SAVE_EVERY": "1", "FAMILY_FT_ROTATE_EVERY": "1",
     "FAMILY_FT_FUSED": True, "FAMILY_FT_REG_DIR": "", "FAMILY_FT_REG_MULT": "0.2",
+    "FAMILY_REG_ON": False, "FAMILY_REG_DIR": "", "FAMILY_REG_MULT": "1.0", "FAMILY_REG_USE": REG_MATCH,
     "DATASET_MEGAPIXELS": "0.25", "DATASET_CAPTION_EXT": ".txt", "ENABLE_BUCKET": True, "BUCKET_NO_UPSCALE": True,
-    "ENABLE_CACHE": True, "MASKED_TRAINING": False, "MASK_FLOOR": "0.1 (recommended)", "MASK_PRIOR": "Off",
+    "ENABLE_CACHE": True, "MASKED_TRAINING": False, "MASK_FLOOR": "0.1 (recommended)", "MASK_PRIOR": "Off", "FACE_BOOST": False, "FACE_BOOST_AREA": "Face and hair",
     "METADATA_TITLE": "", "METADATA_AUTHOR": "", "METADATA_DESCRIPTION": "", "METADATA_LICENSE": "",
     "METADATA_TAGS": "", "METADATA_TRIGGER_PHRASE": "", "METADATA_THUMBNAIL": "",
     "SAMPLE_ENABLED": True, "SAMPLE_PROMPT": "A high quality photo", "SAMPLE_SEED": "1234",
@@ -103,6 +120,11 @@ DEFAULTS = {
     "SAMPLE_EVERY_AFTER": "1", "SAMPLE_AT_FIRST": True, "SAMPLE_CHECKPOINT": True, "CACHE_SAMPLE_MODEL": "auto",
 }
 
+
+BATCH_HINT = ("How many pictures train together each step. Faster when blocks are swapped, and on smaller models "
+              "like SDXL and Anima. Uses more memory (Auto allows for it). Settings that need 1 grey out. Auto (where "
+              "offered): the batch measured fastest for this model at your size, on a 40 GB+ card; 1 elsewhere.")
+BATCH_OFF = "Off while Batch size is above 1: it reads one picture a step."
 
 TRAINING_ORDER = ("model", "output", "params", "edit", "slider", "finetune", "memory", "optimizer", "other")
 # any other Training card (Masked training, Subjects) comes after these, under the Extras divider
@@ -158,8 +180,10 @@ def _option_row(opt):
                 **({"labels": list(opt.suggestions)} if kind == "combo" else {}),
                 **({"warn": opt.warn, "warn_link": opt.warn_link} if opt.warn else {}),
                 **({"featured": True} if opt.featured else {}),
+                **({"advanced_of": opt.requires.partition("=")[0]} if opt.advanced and opt.requires else {}),
                 **({"split": list(opt.split), "split_hint": opt.split_hint} if kind == "split" and opt.split else {}),
-                **({"slide": list(opt.slide), "slide_hint": opt.slide_hint} if kind == "split" and opt.slide else {}),
+                **({"slide": list(opt.slide), "slide_hint": opt.slide_hint,
+                    **({"slide_alt": list(opt.slide_alt)} if opt.slide_alt else {})} if kind == "split" and opt.slide else {}),
                 **({"single": opt.single} if kind == "split" and opt.single else {}))
 
 
@@ -183,8 +207,8 @@ def kind_sets(desc, kind):
     """What picking a kind of training also sets (the desktop's _family_kind_chosen): Fine-tune takes the family's
     fine-tune learning rate with Adaptive LR off; a family's kind_values come too."""
     out = dict(dict(getattr(desc, "kind_values", ()) or ()).get(kind, ()))
-    if kind == "finetune":
-        out.update(LEARNING_RATE=f"{desc.ft_learning_rate:g}", ADAPTIVE_LR=False)
+    if kind == "finetune":                   # Adafactor: what every fine-tune is tested on (#312)
+        out.update(LEARNING_RATE=f"{desc.ft_learning_rate:g}", ADAPTIVE_LR=False, OPTIMIZER_TYPE="adafactor")
     return out
 
 
@@ -271,8 +295,7 @@ def form(desc):
             sections.append({"id": sid, "title": title, "tab": tab, "rows": rows, "collapsed": collapsed,
                              **({"help": help} if help else {})})
 
-    add("model", "Base Model", "training",
-        by_section("model") + ([_row("_model_note", desc.model_note, "note")] if desc.model_note else []))
+    add("model", "Base Model", "training", by_section("model"))
     add("output", "Output", "training", [
         _row("LORA_OUTPUT_DIR", "Output Directory", "folder", "Where the LoRA, its checkpoints and the previews go. A folder picked here is kept for "
              "this model; empty (or Reset to default) uses the LoRA output folder in Preferences.",
@@ -356,7 +379,7 @@ def form(desc):
                  "picture. Each image's progress, with its thumbnail and its caption to edit, is under Per-image loss "
                  "on the run card while it trains, and in Runs & outputs."),
             _row("KREA2_PER_IMAGE_LR", "Per-image adaptive LR (throttle stuck images, boost healthy learned ones)",
-                 "check", "Images that stay hard without improving train more gently (x0.7, then x0.5 down to x0.1); "
+                 "check", "Images that stay hard without improving train more gently (x0.7, then x0.5 down to x0.25); "
                  "mined-out ones ease off (x0.6) and healthy learned ones get a gentle boost (x1.1). Batch size 1."),
             _row("KREA2_WARMUP_LOOK", "Warm up look outliers (unusual angles ease in at low LR - needs a Look "
                  "Filter scan)", "check", "Person LoRAs: images the Image Prep Look Filter scored as look outliers (tight angles, "
@@ -366,7 +389,9 @@ def form(desc):
             _row("KREA2_AUTO_RECAPTION", "Auto-recaption stuck images (Qwen3-VL rewrites the caption between "
                  "epochs)", "check", "A stuck image gets a new caption written from what is in it, and a fresh start; "
                  "a second try goes into more detail. Still stuck after that, it is left out of training - edit its "
-                 "caption to bring it back. Needs the Krea 2 text encoder set in Preferences."),
+                 "caption to bring it back. The new captions are written by Qwen3-VL: the Krea 2 text encoder, or "
+                 "Qwen3-VL 8B if you've set it as the secondary captioning model in Preferences. The other models on "
+                 "the Captions tab (Florence-2, JoyCaption, the WD tagger) aren't used for auto-recaption."),
             _row("RECAPTION_FIRST", "First try uses", "choice",
                  "The Captions tab's instruction for that task, as you've edited it there. The defaults are the "
                  "person or character versions: for an object or product, pick the (object or product) Training "
@@ -383,6 +408,25 @@ def form(desc):
                  "before it is written and trained. Existing captions are left alone."),
             _row("CAPTION_TRIGGER_WORD", "Trigger word", hint="Used by Auto-recaption (below): it adds this word at the "
                  "end of a new caption. The training folder's word, the same as the Captions tab's."),
+        ]
+    if desc.training_maps:
+        params.append(_row("TRAINING_MAPS", "Training maps (watch what your LoRA is learning)",
+                           "check", "Heatmaps over three of your own pictures, updated every epoch: which parts the "
+                           "LoRA has learned, which it hasn't yet, and where it's changing things it shouldn't, like "
+                           "the background or clothes. Open them with the Training maps button on the run card. Adds "
+                           "a few seconds an epoch."))
+    if desc.element_boost and desc.masked_training:   # Element boost: stills, with or without masks (a mask trims it)
+        params += [
+            _row("FACE_BOOST", "On", "check",
+                 "Early in the run, the face (or the part you pick below) counts for much more than the rest of "
+                 "the picture, so it's learned faster. For sets of medium and full-length shots, where the face is "
+                 "small in the frame. Needs Target Megapixels 0.75 or more."),
+            _row("FACE_BOOST_AREA", "What it boosts", "choice",
+                 "Face and hair (the default): the face and the hair around it. Face only: just the face, for when "
+                 "the hair changes from picture to picture or shouldn't be learned. These two use the face "
+                 "finder. The rest are the Make masks choices, found by its person finder: the clothes for an "
+                 "outfit LoRA, the background for a place, and so on.",
+                 launch.FACE_AREAS),
         ]
     params += by_section("training", "", "lora")
     if desc.identity_blocks:
@@ -447,6 +491,26 @@ def form(desc):
         # last, under everything that changes them: what training will use, per subject (one of its own captions)
         *[_row(f"_subject{n}_as", f"Subject {n} - what training will use", "note", hint_labels=True)
           for n in ((1, 2, 3, 4) if desc.multi_concept else (1,))],
+        # the card's last part, in a fold of its own (closed until the tick is on), under Check a trigger word: a
+        # regularisation dataset, which sets everything above aside for the run (#332)
+        *([_row("FAMILY_REG_ON", "Train with a regularisation dataset", "check",
+                "For a LoRA that changes too much besides its subject. Alongside your training pictures, Fizgig "
+                "trains on a second folder of ordinary pictures of the same kind of thing (other people for a "
+                "person, other characters for a character, other pictures in the genre for a style). They hold the "
+                "model's idea of that kind of thing in place while your subject trains. It is an alternative to DOP "
+                "and Fizgig LoRA Isolation, so the choices above are set aside while it is on.",
+                fold="lorareg", fold_label=REG_FOLD, fold_on="FAMILY_REG_ON"),
+           _row("FAMILY_REG_DIR", "Regularisation pictures", "folder",
+                "Real pictures, each with a caption file that describes it and does not use your trigger word. Not "
+                "pictures the model made: those teach it its own mistakes. Aim for at least as many as your "
+                "training pictures.", upload=True, start="data", fold="lorareg"),
+           _row("FAMILY_REG_MULT", "Regularisation LR ×", "combo",
+                "The regularisation pictures train at this fraction of the learning rate. 1.0 trains them as firmly "
+                "as your own pictures; lower makes them a lighter anchor.", choices=FT_REG_MULT, fold="lorareg"),
+           _row("FAMILY_REG_USE", "Use each epoch", "choice",
+                "How many of the regularisation pictures each epoch trains on: a different handful each epoch, so "
+                "over a run the whole folder is used.", REG_USES, fold="lorareg")]
+          if desc.lora_regularisation else []),
     ]
     if desc.training_adapter:
         params.append(_row("FAMILY_TRAINING_ADAPTER", "Training adapter (recommended)", "check",
@@ -509,9 +573,12 @@ def form(desc):
             _row("_edit_edited_dir", "2. Edited folder (after editing)", "shown", "The same photos after your edit, "
                  "with the same file names as the originals. It is the training folder on the Start tab: choosing it "
                  "here changes it there too.", sets_training_folder=True),
-            _row("FAMILY_EDIT_CAPTION", "3. Edit instruction", hint="What the edit is, e.g. \"Apply my concert grade.\" "
-                 "Write captions saves it as the caption of every photo in the Edited folder.",
-                 action="write_captions"),
+            _row("FAMILY_EDIT_CAPTION", "3. Edit instruction", "text",
+                 hint="What the edit is, e.g. \"Apply my concert grade.\" Write captions saves the first line as "
+                 "the caption of every photo in the Edited folder.\n"
+                 "Every line is a preview on the test photo: for a LoRA trained on several kinds of edit, put one "
+                 "instruction per line (Enter starts the next) and each round previews them all.",
+                 lines=True, action="write_captions"),
             _row("FAMILY_EDIT_REF", "4. Test photo (optional)", "path",
                  "Optional - you can leave this empty. A photo for the previews to edit, so you can watch the LoRA "
                  "learn: an original, unedited photo that is in neither folder. One it never trains on shows whether "
@@ -637,16 +704,18 @@ def form(desc):
              "larger effective batch, raise this: the same averaged gradient as a bigger batch, at the memory of "
              "batch 1."),
         _row("MAX_GRAD_NORM", "Max Grad Norm"),
+        _row("LR_SCHEDULER", "LR Scheduler", "choice", choices=["constant", "constant_with_warmup", "cosine",
+                                                                 "cosine_with_restarts", "linear", "polynomial"]),
+        _row("LR_WARMUP_STEPS", "Warmup steps"),
     ], collapsed=True)
     add("other", "Other Options", "training", [
         _row("DATASET_CAPTION_EXT", "Caption Extension"),
         _row("ENABLE_BUCKET", "Enable Bucket", "check"),
         _row("BUCKET_NO_UPSCALE", "No Upscale (keep small images at native size)", "check"),
-        _row("LR_SCHEDULER", "LR Scheduler", "choice", choices=["constant", "constant_with_warmup", "cosine",
-                                                                 "cosine_with_restarts", "linear", "polynomial"]),
-        _row("LR_WARMUP_STEPS", "Warmup steps"),
         _row("CAPTION_DROPOUT", "Caption dropout", "choice", CAPTION_DROPOUT_HINT, CAPTION_DROPOUTS,
              default=CAPTION_DROPOUTS[0]) if desc.caption_dropout and pictures else None,
+        _row("BATCH_SIZE", "Batch size", "choice", BATCH_HINT, launch.batch_choices(desc))
+        if desc.batch_training and pictures else None,
         *by_section("training", "other", "lora"),
         _row("METADATA_TITLE", "Title"), _row("METADATA_AUTHOR", "Author"),
         _row("METADATA_DESCRIPTION", "Description"), _row("METADATA_LICENSE", "License"),
@@ -689,6 +758,16 @@ def form(desc):
                      if desc.train_preview_checkpoint else "")
                   + (" Default " + f"{spd[1]:g}." if spd[1] else "")),
             turbo={"on": live, "off": plain})]
+        if desc.samples_turbo_tick:
+            turbo_rows = [
+                _row("FAMILY_TURBO_ON", f"Use the {sp.name} for previews", "check", default=True,
+                     hint=f"On: previews render in {spd[0]} steps{cfg_on} with the {sp.name} at the strength beside "
+                          f"it ({spd[1]:g} is Fizgig's recommended setting). Off: full-quality previews "
+                          f"({desc.preview_steps} steps{cfg_off}), slower. Steps and CFG switch with it. Previews "
+                          "only, never the saved LoRA. It works on previews of your Base, not on SFT."),
+                dict(turbo_rows[0], label="Strength",
+                     hint=f"The {sp.name}'s strength while the tick is on. {spd[1]:g} is Fizgig's recommended "
+                          "setting.")]
     if sp is not None and sp.pref_key:
         turbo_rows.append(_row("TURBO_MISSING", "", "note",
                                f"Set the {sp.name} in Preferences for fast Turbo previews; without it previews use "
@@ -697,8 +776,10 @@ def form(desc):
         # an edit run's previews come from the Edit pairs card, not these prompts (shown only while Edit is picked)
         _row("_edit_samples_note", "Edit LoRA previews: each round makes one picture from your edit instruction and "
              "test photo (Training tab, Edit pairs" + (", with its extra pictures" if desc.edit_references > 1 else "")
-             + "). The prompts below are not used - to try other instructions while it trains, type them below "
-             "(one per line) and tick Change the previews of the run going now.", "note")
+             + "). The prompts below aren't used: to preview several instructions, put one per line in the Edit "
+             "instruction box and each renders on the test photo. With no test photo set, previews use your first "
+             "original. While a run trains, instructions typed below (one per line, with Change the previews of the "
+             "run going now ticked) replace its previews from the next one.", "note")
         if desc.edit_training else None,
         _row("SAMPLE_ENABLED", "Make previews while training", "check"),
         _row("_prompts_note", " ".join(t for k, t in desc.samples_text if k == "prompts"), "note")
@@ -725,9 +806,16 @@ def form(desc):
                                "off": {"SAMPLE_STEPS": str(desc.preview_steps),
                                        "SAMPLE_CFG_SCALE": f"{desc.preview_cfg:g}"}}}
                    if desc.preview_checkpoint_sampling else {}))] if desc.train_preview_checkpoint else []),
-        _row("FAMILY_PREVIEW_LOOK", desc.preview_look_tick, "check", desc.preview_look_hint, default=False,
+        _row("FAMILY_PREVIEW_LOOK", desc.preview_look_tick, "check", desc.preview_look_hint,
+             default=desc.preview_look_on,
              **({"bold": desc.preview_look_bold} if desc.preview_look_bold else {}))
         if desc.preview_look() is not None else None,
+        _row("FAMILY_PREVIEW_SMALL", f"Faster, smaller previews ({desc.preview_small_card_option} px)", "check",
+             f"For cards under 20 GB. Previews render at {desc.preview_small_card_option} px on the long side instead "
+             f"of full size, so they finish sooner. {desc.display_name} looks noticeably worse below its normal size "
+             "(softer, odd colours, faces can break), so use them to watch progress, not to judge how good the LoRA "
+             "is. On by default on these cards until you choose; untick it for full-size previews.", default=False)
+        if desc.preview_small_card_option else None,
         _row("SAMPLE_STRENGTHS", "Also preview at strength " + ", ".join(f"{x:g}" for x in desc.preview_strengths),
              "check", "Each preview is rendered again at that strength (same prompt and seed), beside the "
              "full-strength one: how the LoRA will look or sound the way you'll use it.", default=True)
@@ -780,7 +868,26 @@ def form(desc):
 
 # what a preset never carries (the desktop's): the Samples tab and the Turbo boxes are the model's own, a resume path
 # is one run's
-NOT_IN_PRESETS = ("FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE", "CACHE_SAMPLE_MODEL",
+def small_canvas(width, height, cap):
+    """A preview canvas with its long side capped to `cap` px, rounded down to multiples of 32 - the trainer's
+    _cap_canvas (Faster, smaller previews), here so the Samples tab can say the size before a run."""
+    long = max(width, height)
+    if long <= cap:
+        return width, height
+    s = cap / long
+    return max(64, int(width * s) // 32 * 32), max(64, int(height * s) // 32 * 32)
+
+
+def turbo_ticked_off(desc, values):
+    """The Samples tab's Use the Turbo LoRA tick (description.samples_turbo_tick) unticked: previews without the Turbo,
+    whatever its strength box says. A form that never saved the tick has it on."""
+    if not getattr(desc, "samples_turbo_tick", False):
+        return False
+    on = (values or {}).get("FAMILY_TURBO_ON")
+    return on is False or str(on).strip().lower() in ("false", "0", "no", "off")
+
+
+NOT_IN_PRESETS = ("FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON", "FAMILY_PREVIEW_SMALL", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE", "CACHE_SAMPLE_MODEL",
                   "FAMILY_PREVIEW_LOOK",
                   "RESUME_TRAINING", "CAPTION_TRIGGER_WORD")     # the trigger word is the training folder's
 # boxes a preset can't put an unknown value in (the desktop's _STRICT_COMBO_KEYS): the current choice stays
@@ -873,6 +980,44 @@ CONCEPT_ROWS = (("FAMILY_CONCEPT_DIR", "FAMILY_DOP_TRIGGER2", "FAMILY_DOP_CLASS2
 DOP_EXTRA_ROWS = {k for _d, t, c in CONCEPT_ROWS for k in (t, c)}
 
 
+REG_KEYS = ("FAMILY_REG_ON", "FAMILY_REG_DIR", "FAMILY_REG_MULT", "FAMILY_REG_USE")
+REG_GREYED = "Greyed out: a regularisation dataset is on (at the bottom of this card). Untick it to use these."
+_SUBJECT_KEYS = {}
+
+
+def _subject_keys(desc):
+    """The Subjects card's own settings, every one above its Regularisation dataset fold: what turning that on greys.
+    Read from the card (form()), so a row added to it later is greyed too."""
+    if desc.key not in _SUBJECT_KEYS:
+        sec = next((s for s in form(desc)["sections"] if s["id"] == "subjects"), {"rows": []})
+        _SUBJECT_KEYS[desc.key] = tuple(r["key"] for r in sec["rows"]
+                                        if r["kind"] not in ("note", "shown") and not r.get("fold"))
+    return _SUBJECT_KEYS[desc.key]
+
+
+def reg_ticked(desc, values):
+    """The Subjects card's Regularisation dataset is ticked and applies (a family with it, a Standard LoRA or LoKR)."""
+    return bool(getattr(desc, "lora_regularisation", False)) and _kind(desc, values) == "standard" \
+        and bool(values.get("FAMILY_REG_ON"))
+
+
+def _reg_budget_note(desc, values, image_folder):
+    """The figure beside Use each epoch: how many regularisation pictures an epoch takes, and what that does to an
+    epoch's length (launch.lora_reg_budget: the number the trainer is given)."""
+    st = {**values, "image_folder": image_folder, "subfolders": bool(values.get("TRAIN_SUBFOLDERS")),
+          "FAMILY_FT": False, "FAMILY_SLIDER": False, "FAMILY_EDIT": False}
+    if not launch.lora_reg_dir(desc, st):
+        return "Pick the folder to see how many that is."
+    per, have, train = launch.lora_reg_budget(desc, st)
+    if not have:
+        return "That folder has no pictures yet."
+    said = (f"all {have} pictures, every epoch" if per >= have else
+            f"{per} of {have} pictures, a different {per} each epoch" +
+            (" (as many as your training pictures)" if not str(values.get("FAMILY_REG_USE") or "").strip()[:1].isdigit()
+             else ""))
+    return said[0].upper() + said[1:] + (f". Each epoch goes from {train} pictures to {train + per}." if train else ".")
+
+
 def concept_count(values):
     """Subjects in a Multi Concept run, the training folder included (2-4)."""
     v = str(values.get("FAMILY_CONCEPT_COUNT") or CONCEPT_COUNTS[0])
@@ -882,6 +1027,28 @@ def concept_count(values):
 def _kind(desc, values):
     label = values.get("FAMILY_KIND", "")
     return next((k for k, lab in kinds(desc) if lab == label or k == label), "standard")
+
+
+def batch_blockers(desc, values):
+    """What in a run's Training-tab values trains one picture a step (Batch size above 1 greys it out or keeps the run
+    at 1), in plain words; [] when the run can batch."""
+    if not desc.batch_training:
+        return ["this model trains one picture a step"]
+    kind = _kind(desc, values)
+    reg = reg_ticked(desc, values)          # a regularisation dataset sets DOP and Isolation aside (greyed, kept)
+    out = [w for on, w in ((kind == "edit", "an edit"), (kind == "slider", "a slider"),
+                           (values.get("FAMILY_DOP") and not reg, "DOP"),
+                           (values.get("FAMILY_MULTI_PERSON") and not reg, "Fizgig LoRA Isolation"),
+                           (str(values.get("STAGE_MP") or "Off") != "Off", "Start at a smaller size"),
+                           (values.get("MASKED_TRAINING") and str(values.get("MASK_PRIOR") or "Off") != "Off",
+                            "keeping the model's own picture outside the mask")) if on]
+    return out + [o.label.strip() for o in desc.options if getattr(o, "batch_off", False) and _on(values, o)]
+
+
+def _on(values, o):
+    """A family check's value in the Training-tab values, its default when unset."""
+    v = values.get(o.key, (values.get("FAMILY_OPTIONS") or {}).get(o.key, getattr(o, "default", "")))
+    return v not in (None, "", False, "0", 0)
 
 
 SUBFOLDERS_HINT = ("Off: only the pictures directly in the training folder are used.\nOn: the pictures in its "
@@ -898,6 +1065,7 @@ def subfolders_note(desc, values, image_folder):
         return "", None
     # the form's values name the kind of training (a label), not FAMILY_FT: a fine-tune's regularisation folder
     reg = _str(values.get("FAMILY_FT_REG_DIR")) if desc.finetune and _kind(desc, values) == "finetune" else ""
+    reg = reg or (_str(values.get("FAMILY_REG_DIR")) if reg_ticked(desc, values) else "")   # or a LoRA's (#332)
     subs = launch.subfolders(image_folder, (_str(values.get("LORA_OUTPUT_DIR")), reg))
     if not subs:
         return ("This training folder has no sub-folders with pictures." if values.get("TRAIN_SUBFOLDERS") else ""), None
@@ -951,7 +1119,7 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     poll = False                                  # something is under way (a download): the page asks again soon
     ck_turbo = False                              # previews on a preview checkpoint that takes the Turbo LoRA
     hidden |= ({"TURBO_MISSING"} if speed_file else
-               {"FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE"})
+               {"FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_STEPS", "FAMILY_TURBO_PACE", "FAMILY_TURBO_ON"})
     if speed_file and desc.samples_turbo_pace:     # H3 with its Turbo on renders at the Turbo row's steps
         try:
             pace = float(str(values.get("FAMILY_TURBO_PACE", "") or round(100 * desc.preview_speed_defaults()[1])))
@@ -964,20 +1132,31 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     if not captioner or not values.get("KREA2_AUTO_RECAPTION"):
         hidden |= {"RECAPTION_FIRST", "RECAPTION_SECOND", "RECAPTION_REPLACEMENTS"}
     kind = _kind(desc, values)
+    # a regularisation dataset (the Subjects card's last fold, #332): the rest of the card is set aside for the run -
+    # greyed, its values kept - so nothing it would switch on elsewhere (Isolation's loss watch off) applies either
+    reg = reg_ticked(desc, values)
     # Also train on its sub-folders: a plain LoRA or a fine-tune (Subjects 2-4, DOP and Isolation keep one folder per
     # subject; an edit or a slider pairs files)
-    if kind in ("edit", "slider") or values.get("FAMILY_MULTICONCEPT") or values.get("FAMILY_DOP")             or values.get("FAMILY_MULTI_PERSON"):
+    if kind in ("edit", "slider") or (not reg and (values.get("FAMILY_MULTICONCEPT") or values.get("FAMILY_DOP")
+                                                   or values.get("FAMILY_MULTI_PERSON"))):
         hidden.add("TRAIN_SUBFOLDERS")
     else:
         notes["TRAIN_SUBFOLDERS"], act = subfolders_note(desc, values, image_folder)
         if act:
             actions["TRAIN_SUBFOLDERS"] = act
+    if not values.get("FACE_BOOST"):
+        hidden.add("FACE_BOOST_AREA")
+    if desc.element_boost and launch.boost_too_small(desc, values):    # too few pixels in a small face: greyed, kept
+        disabled.add("FACE_BOOST")
+        hidden.add("FACE_BOOST_AREA")
+        notes["FACE_BOOST"] = launch.BOOST_TOO_SMALL.format(mp=launch.BOOST_MIN_MP)
     if desc.masked_training:
         prompt_slider = kind == "slider" and launch.slider_on(desc, {"FAMILY_SLIDER": True, "FAMILY_SLIDER_SOURCE": (
             "prompts" if values.get("FAMILY_SLIDER_SOURCE") == "Prompts" else "pairs")}, "prompts")
         media = launch.dataset_media(image_folder) if image_folder else {"photo"}
         if prompt_slider or (media and "photo" not in media):
             hidden.add("masks")             # a prompt slider makes its own pictures; a folder of clips has none to mask
+            hidden |= {"FACE_BOOST", "FACE_BOOST_AREA"}   # nor anything for Element boost to find
         elif not values.get("MASKED_TRAINING"):
             hidden |= {"MASK_FLOOR", "MASK_PRIOR"}
         else:
@@ -998,14 +1177,49 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
         hidden.add("LEARNING_RATE")          # Adaptive LR on: Min and Max in its place (the box is ignored)
     if kind == "finetune":       # a fine-tune trains at its own fixed rate: no Adaptive LR, on any model
         hidden.add("ADAPTIVE_LR")
-    if str(values.get("OPTIMIZER_TYPE", "")) == "automagic3":
+    if kind == "finetune":       # its optimizers take no args; a LoRA optimizer is said, and trains as Adafactor (#312)
+        from fizgig.training.optimizers import FT_OPTIMIZERS
+        hidden.add("OPTIMIZER_ARGS")
+        ft_opt = str(values.get("OPTIMIZER_TYPE", "") or "").strip().lower()
+        if ft_opt and ft_opt not in FT_OPTIMIZERS:
+            notes["OPTIMIZER_TYPE"] = (f"{ft_opt} is a LoRA optimizer - a fine-tune can't use it, so it would train "
+                                       f"with Adafactor. Pick Adafactor (recommended: what every Fizgig fine-tune is "
+                                       f"tested on), or AdamW8bit, AdamW, AdEMAMix8bit or Lion8bit.")
+    opt = str(values.get("OPTIMIZER_TYPE", "")) if kind != "finetune" else ""
+    if opt in ("automagic3", "automagic4"):
         disabled |= {"ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK"}
         force.update({k: False for k in ("ADAPTIVE_LR", "KREA2_PER_IMAGE_LR", "KREA2_WARMUP_LOOK") if values.get(k)})
         if values.get("ADAPTIVE_LR"):            # turned off now: as it shows with Adaptive LR off
             hidden.discard("LEARNING_RATE")
             hidden |= {"ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX"}
-        notes["OPTIMIZER_TYPE"] = "automagic3 sets its own learning rate: Adaptive LR, per-image LR and the look " \
+        notes["OPTIMIZER_TYPE"] = f"{opt} sets its own learning rate: Adaptive LR, per-image LR and the look " \
                                   "warm-up are off."
+    elif opt in ("prodigy", "muon"):             # #292: its own Optimizer Args when the box is empty or the other's
+        from fizgig.training.optimizers import MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS
+        mine, other = ((PRODIGY_DEFAULT_ARGS, MUON_DEFAULT_ARGS) if opt == "prodigy" else
+                       (MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS))
+        if str(values.get("OPTIMIZER_ARGS") or "").strip() in ("", other):
+            force["OPTIMIZER_ARGS"] = mine
+        if opt == "muon":
+            notes["OPTIMIZER_TYPE"] = "muon matches AdamW's step size: the usual learning rates and Adaptive LR apply."
+        else:
+            # per-image LR stays: with Prodigy it weights that image's loss, it never writes the group rate
+            disabled |= {"LEARNING_RATE", "ADAPTIVE_LR", "KREA2_WARMUP_LOOK"}
+            force.update({k: False for k in ("ADAPTIVE_LR", "KREA2_WARMUP_LOOK") if values.get(k)})
+            hidden |= {"ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX"}
+            hidden.discard("LEARNING_RATE")
+            if str(values.get("LEARNING_RATE") or "").strip() != "1.0":
+                force["LEARNING_RATE"] = "1.0"
+            notes["OPTIMIZER_TYPE"] = ("prodigy finds its own learning rate: the Learning Rate box is a multiplier, "
+                                       "locked to 1.0, and Adaptive LR and the look warm-up are off. Per-image LR "
+                                       "still works, as a weight on each picture's loss.")
+    if kind != "finetune" and opt not in ("prodigy", "muon"):
+        # switched away from Muon / Prodigy (every picture preset is on Muon): their default args left in the box made
+        # AdamW / AdamW8bit fail to build and fall back to plain, unfused AdamW, with only a log warning. Exactly their
+        # defaults are cleared; anything typed by hand stays.
+        from fizgig.training.optimizers import MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS
+        if str(values.get("OPTIMIZER_ARGS") or "").strip() in (MUON_DEFAULT_ARGS, PRODIGY_DEFAULT_ARGS):
+            force["OPTIMIZER_ARGS"] = ""
     hidden |= {s for s, k in (("edit", "edit"), ("slider", "slider"), ("finetune", "finetune")) if k != kind}
     if kind == "finetune":
         disabled |= {"MAX_TRAIN_EPOCHS", "SAVE_EVERY_N_EPOCHS"}
@@ -1021,7 +1235,8 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     # Fizgig LoRA Isolation needs two or more subjects (its recipe teaches a face to belong to one trigger, against
     # a second one): with one, Off and Leave the rest of the model alone stay, Isolation is greyed, and a saved
     # one-subject form on Isolation moves to Leave the rest of the model alone (the nearest: it keeps the DOP pass)
-    one_sub = kind == "standard" and (concept_count(values) if values.get("FAMILY_MULTICONCEPT") else 1) == 1
+    one_sub = kind == "standard" and not reg and \
+        (concept_count(values) if values.get("FAMILY_MULTICONCEPT") else 1) == 1
     if one_sub:
         disabled_choices["FAMILY_PEOPLE_MODE"] = {PEOPLE_MODES[2]: "Needs two or more subjects: add one under Who or "
                                                                    "what is this LoRA of?"}
@@ -1035,7 +1250,7 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
                                            "subjects. Pick 2 subjects above to use it.")
     if kind != "standard":                            # multi-person mode: a LoRA (its LR boost is per step)
         hidden.add("FAMILY_MULTI_PERSON")
-    elif values.get("FAMILY_MULTI_PERSON"):           # it runs on DOP
+    elif values.get("FAMILY_MULTI_PERSON") and not reg:     # it runs on DOP
         force["FAMILY_DOP"] = True
         disabled.add("FAMILY_DOP")
         if desc.loss_watch:             # a new AI caption would be encoded with the trigger unfused
@@ -1086,6 +1301,17 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     for i, (d, t, c) in enumerate(CONCEPT_ROWS, start=2):     # subject i's folder, line and words, up to the count
         if i > n_sub:
             hidden |= {d, t, c, f"_subject{i}_as", KIND_ROWS[i - 1]}
+    # the Regularisation dataset fold: a family with it, a Standard LoRA or LoKR (a fine-tune has its own folder)
+    if not getattr(desc, "lora_regularisation", False) or kind != "standard":
+        hidden |= set(REG_KEYS)
+    elif reg:
+        disabled |= set(_subject_keys(desc))
+        for k in ("FAMILY_SUBJECTS", "FAMILY_PEOPLE_MODE"):
+            notes[k] = REG_GREYED
+        hidden |= {f"_subject{i}_as" for i in (2, 3, 4)}       # one subject trains: the training folder
+        notes["FAMILY_REG_USE"] = _reg_budget_note(desc, values, image_folder)
+    else:
+        disabled |= {"FAMILY_REG_DIR", "FAMILY_REG_MULT", "FAMILY_REG_USE"}
     
     kn = _kind_notes(desc)
     if len(kinds(desc)) > 1:
@@ -1138,7 +1364,10 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
     if pairs:
         notes["_slider_plus_dir"] = image_folder or "Not chosen yet - pick it on the Start tab"
     notes["_edit_edited_dir"] = image_folder or "Not chosen yet - pick it on the Start tab"
-    media = launch.dataset_media(image_folder) if image_folder else set()
+    # the folder's own media plus its sub-folders' when the run trains on them (the tick is shown and on): the clip
+    # size row doesn't vanish when the clips sit only under a sub-folder
+    subs_on = "TRAIN_SUBFOLDERS" not in hidden and bool(values.get("TRAIN_SUBFOLDERS"))
+    media = launch.dataset_media(image_folder, subs_on) if image_folder else set()
     if "clip" not in media:                          # clips' own size only when the folder holds clips
         hidden.add("CLIP_MEGAPIXELS")
     # what the run ignores (launch.plan): a slider or a fine-tune trains its own blocks (Model Area), and a
@@ -1209,12 +1438,28 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
             ck_turbo = True                       # Kromoss as the preview model: the Turbo LoRA joins it
         elif speed_file and desc.preview_speed() is not None and not desc.samples_turbo_pace:
             # previews on this checkpoint never take the speed LoRA (it joins previews on the training model)
-            disabled.add("FAMILY_TURBO_STRENGTH")
+            disabled |= {"FAMILY_TURBO_STRENGTH", "FAMILY_TURBO_ON"}
             notes["FAMILY_TURBO_STRENGTH"] = (
                 f"Greyed out: the {desc.preview_speed().name} doesn't work with this preview model. Set Kromoss as the "
                 "preview model in Preferences to use it." if desc.checkpoint_speed_except else
                 f"The {desc.preview_speed().name} applies to previews on the training model: untick "
                 f"\"{desc.preview_checkpoint_tick.split(' (')[0]}\" to use it.")
+    if turbo_ticked_off(desc, values):
+        disabled.add("FAMILY_TURBO_STRENGTH")
+    cap = int(getattr(desc, "preview_small_card_option", 0) or 0)
+    if cap:                                       # Faster, smaller previews: the size they will really render at
+        try:
+            w = int(str(values.get("SAMPLE_WIDTH") or desc.preview_width))
+            h = int(str(values.get("SAMPLE_HEIGHT") or desc.preview_height))
+        except ValueError:
+            w = h = 0
+        if w > 0 and h > 0:
+            cw, ch = small_canvas(w, h, cap)
+            on = bool(values.get("FAMILY_PREVIEW_SMALL"))
+            notes["FAMILY_PREVIEW_SMALL"] = (
+                f"Your previews are already {cap} px or smaller, so this changes nothing." if (cw, ch) == (w, h) else
+                f"Your {w} × {h} previews will render at {cw} × {ch}." if on else
+                f"Ticked, your {w} × {h} previews would render at {cw} × {ch}.")
     if desc.preview_look() is not None:
         # the preview look LoRA (MOSS-Image's SFT look, Z-Image Base's Turbo look): on previews of the training model
         # only; its file comes down the first time it's ticked (look_fetch: that download's state)
@@ -1237,6 +1482,21 @@ def state(desc, values, image_folder="", captioner="", speed_file=False, checkpo
                                                 "or download it from Preferences.")
             elif state == "done":
                 notes["FAMILY_PREVIEW_LOOK"] = "Downloaded: previews use it from the next one."
+    if desc.batch_training:
+        one_a_step = kind in ("edit", "slider") or (not reg and (values.get("FAMILY_DOP") or
+                                                                  values.get("FAMILY_MULTI_PERSON")))
+        if one_a_step:
+            disabled.add("BATCH_SIZE")
+            notes["BATCH_SIZE"] = ("Greyed out: sliders, edits, DOP and Fizgig LoRA Isolation train one picture a "
+                                   "step.")
+        elif str(values.get("BATCH_SIZE") or "").strip().lower() == "auto":
+            notes["BATCH_SIZE"] = launch.batch_auto_note(desc, values.get("DATASET_MEGAPIXELS") or 1.0)
+        elif str(values.get("BATCH_SIZE") or "1") not in ("", "1"):
+            off = {"STAGE_MP", "STAGE_UNTIL", "MASK_PRIOR"}
+            off |= {o.key for o in desc.options if getattr(o, "batch_off", False)}
+            disabled |= off
+            for k in off:
+                notes.setdefault(k, BATCH_OFF)
     return {"hidden": sorted(hidden), "disabled": sorted(disabled), "notes": notes, "kind": kind,
             "media": sorted(media), "turbo_file": bool(speed_file), "force": force, "actions": actions,
             "shown": shown, "checkpoint_file": bool(checkpoint_file), "labels": labels, "checkpoint_turbo": ck_turbo,
@@ -1333,6 +1593,8 @@ def _lr_hint(desc, values, kind, image_folder):
     hint = getattr(desc, "lr_hint", (2e-4, 125))
     if not hint or kind != "standard" or not image_folder:
         return None
+    if str(values.get("OPTIMIZER_TYPE") or "") in ("prodigy", "automagic4"):    # they set their own rate
+        return None
     adaptive = bool(values.get("ADAPTIVE_LR"))
     key = "ADAPTIVE_LR_MIN" if adaptive else "LEARNING_RATE"
     raw = str(values.get(key) or "").split(" ")[0].strip()
@@ -1385,6 +1647,7 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         FAMILY_SLIDER_SOURCE=(("prompts" if s("FAMILY_SLIDER_SOURCE") == "Prompts" else "pairs")
                               if len(slider_sources(desc)) > 1 else slider_sources(desc)[0]),
         ADAPTIVE_LR=b("ADAPTIVE_LR") and desc.adaptive_lr, SAVE_STATE=b("SAVE_STATE"),
+        TRAINING_MAPS=b("TRAINING_MAPS") and desc.training_maps,
         SAVE_STATE_ON_TRAIN_END=b("SAVE_STATE_ON_TRAIN_END"), FAMILY_FT_FUSED=b("FAMILY_FT_FUSED"),
         FAMILY_SLIDER_ULTRA=b("FAMILY_SLIDER_ULTRA"),
         FAMILY_FAST_ID=b("FAMILY_FAST_ID") and kind == "standard" and bool(desc.identity_blocks),
@@ -1392,11 +1655,12 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
             "FAMILY_TRAIN_BLOCKS": [k for k, on in (v.get("TRAINING_BLOCKS") or {}).items() if on]}
            if desc.train_areas else {}),
         FAMILY_TRAINING_ADAPTER=b("FAMILY_TRAINING_ADAPTER"),
-        FAMILY_TURBO_STRENGTH=s("FAMILY_TURBO_STRENGTH"), FAMILY_TURBO_STEPS=s("FAMILY_TURBO_STEPS"),
-        FAMILY_TURBO_PACE=s("FAMILY_TURBO_PACE"), FAMILY_PREVIEW_LOOK=b("FAMILY_PREVIEW_LOOK"),
+        FAMILY_TURBO_STRENGTH="0" if turbo_ticked_off(desc, v) else s("FAMILY_TURBO_STRENGTH"),
+        FAMILY_TURBO_STEPS=s("FAMILY_TURBO_STEPS"),
+        FAMILY_TURBO_PACE=s("FAMILY_TURBO_PACE"), FAMILY_PREVIEW_LOOK=b("FAMILY_PREVIEW_LOOK"), FAMILY_PREVIEW_SMALL=b("FAMILY_PREVIEW_SMALL"),
         CAPTION_DROPOUT=caption_dropout_share(s("CAPTION_DROPOUT")) if desc.caption_dropout else 0.0,
         MASKED_TRAINING=b("MASKED_TRAINING") and desc.masked_training, MASK_FLOOR=s("MASK_FLOOR"),
-        MASK_PRIOR=s("MASK_PRIOR"),
+        MASK_PRIOR=s("MASK_PRIOR"), FACE_BOOST=b("FACE_BOOST") and desc.element_boost, FACE_BOOST_AREA=s("FACE_BOOST_AREA"),
         python=python, repo_dir=repo_dir, models=models, image_folder=image_folder,
         caption_ext=s("DATASET_CAPTION_EXT") or ".txt", batch_size=1, megapixels=s("DATASET_MEGAPIXELS"),
         STAGE_MP=s("STAGE_MP") if desc.resolution_stages else "", STAGE_UNTIL=s("STAGE_UNTIL"),
@@ -1430,6 +1694,8 @@ def inputs(desc, values, *, models, python, repo_dir, image_folder, cache_root, 
         subfolders=b("TRAIN_SUBFOLDERS"),
         FAMILY_OPTIONS=_option_values(desc, v),
     )
+    if launch.lora_reg_on(desc, d):        # a regularisation dataset: the rest of the Subjects card gives way (#332)
+        d.update(multiconcept=False, extra_folders=[], FAMILY_DOP=False, FAMILY_MULTI_PERSON=False)
     return d
 
 

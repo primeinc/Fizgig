@@ -1,7 +1,7 @@
 """The web UI's LoRA Royale (the desktop tab's): render every epoch of a run on one seed, crossfade between them, score
 their likeness to the subject, export the morph, promote the winner. The renders run on the GPU worker
 (fizgig.web.studio royale_render); everything here is CPU work in the server - scanning, picking the epochs, likeness
-(ArcFace), the clips (fizgig.lora_royale.export), copies."""
+(AdaFace), the clips (fizgig.lora_royale.export), copies."""
 
 import os
 import re
@@ -9,6 +9,7 @@ import shutil
 import threading
 
 from fizgig.lora_royale.scan import run_name_for_folder, scan_checkpoints
+from fizgig.utils.image import flatten
 
 _lock = threading.Lock()
 _like = {"gen": 0, "scores": {}, "ref": "", "best": None}          # the last scoring, for its render generation
@@ -67,13 +68,13 @@ def _images(rendered):
     out = []
     for label, _path, png in rendered:
         with Image.open(png) as im:
-            out.append((label, im.convert("RGB")))
+            out.append((label, flatten(im)))
     return out
 
 
 def score(gen, rendered, refs):
     """Each render's face against up to 3 photos of the subject, the mean of its similarities (Image Prep's look
-    match - with Auto, ArcFace for a person and DINOv2 for a furry / anime face - on the CPU, as the Samples gallery
+    match - with Auto, AdaFace for a person and DINOv2 for a furry / anime face - on the CPU, as the Samples gallery
     scores against its 3 baselines): {label: score or None (no face)}, and the best."""
     from fizgig.lora_royale import likeness
     if not likeness.available():
@@ -111,7 +112,7 @@ def export(rendered, out_dir, run, fmt="MP4", speed="Normal", pingpong=True, sho
         if like["gen"] != gen or not like["scores"]:
             raise ValueError("Score likeness first - the clip shows each epoch's score beside your subject image.")
         with Image.open(like["ref"]) as ri:
-            ref_img = ri.convert("RGB")
+            ref_img = flatten(ri)
         scores = {lbl: (float("nan") if like["scores"].get(str(lbl)) is None else like["scores"][str(lbl)])
                   for lbl, _ in images}
         frames = rexport.build_likeness_frames(ref_img, images, scores, speed=speed, pingpong=pingpong, brand=brand,
@@ -185,7 +186,7 @@ def save_travel(frames, out_dir, run, prefix, fmt="MP4", speed="Normal", pingpon
     imgs = []
     for png, _label in frames:
         with Image.open(png) as im:
-            imgs.append(im.convert("RGB"))
+            imgs.append(flatten(im))
     if not imgs:
         raise ValueError("Render the frames first.")
     if deflicker and deflicker != "None":

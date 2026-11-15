@@ -52,9 +52,12 @@ def _folders(group, fallback=None):
 
 
 def _items(group):
-    """item_key -> ItemInfo over every training bucket."""
+    """item_key -> ItemInfo over every watched training bucket (not the regularisation set's: its pictures are an
+    anchor at their own fixed LR, never judged, throttled, excluded or recaptioned)."""
     out = {}
     for ds in group.datasets:
+        if getattr(ds, "is_reg", False):
+            continue
         bm = getattr(ds, "batch_manager", None)
         if bm is not None:
             for bucket in bm.buckets.values():
@@ -63,8 +66,19 @@ def _items(group):
     return out
 
 
+def _reg_keys(group):
+    """The item keys of the run's regularisation set (dataset blocks marked is_reg)."""
+    out = set()
+    for ds in getattr(group, "datasets", None) or []:
+        if getattr(ds, "is_reg", False) and getattr(ds, "batch_manager", None) is not None:
+            for bucket in ds.batch_manager.buckets.values():
+                out.update(str(it.item_key) for it in bucket)
+    return out
+
+
 class Watch:
     """The run's loss watch and the state around it. `watch` is None when every toggle is off."""
+    reg = frozenset()                       # the regularisation set's keys (set per run in __init__)
 
     def __init__(self, output_dir, group, user_config, driver, *, log=False, per_image_lr=False, auto_recaption=False,
                  warmup_look=False, resume=False, start_epoch=0, te_path=None, trigger_word=None,
@@ -80,6 +94,7 @@ class Watch:
         self.captioner_path = captioner_path
         self.caption_rules = parse_recaption_rules(recaption_replace_rules) if auto_recaption else ()
         self.watch = None
+        self.reg = _reg_keys(group)         # the regularisation set's pictures: never recorded or judged
         if not resume:
             _cleanup(output_dir)
         if auto_recaption and not (captioner_path and os.path.isfile(captioner_path)):
@@ -163,14 +178,57 @@ class Watch:
 
     # ---- per step --------------------------------------------------------------------------------------
     def excluded(self, batch):
-        return self.watch is not None and self.watch.is_excluded(batch.get("item_keys"))
+        """The step is skipped: its picture is excluded (a batch's: every one of them)."""
+        keys = batch.get("item_keys")
+        if self.watch is None or self._reg_only(keys):
+            return False
+        if isinstance(keys, (list, tuple)) and len(keys) > 1:
+            return all(self.watch.is_excluded([str(k)]) for k in keys)
+        return self.watch.is_excluded(keys)
 
     def multiplier(self, batch):
-        return self.watch.multiplier(batch.get("item_keys")) if self.watch is not None else 1.0
+        keys = batch.get("item_keys")
+        return self.watch.multiplier(keys) if self.watch is not None and not self._reg_only(keys) else 1.0
 
     def observe(self, epoch, step, batch, t, loss):
-        if self.watch is not None:
+        if self.watch is not None and not self._reg_only(batch.get("item_keys")):
             self.watch.observe(epoch=epoch, step=step, item_keys=batch.get("item_keys"), timestep=t, loss=loss)
+
+    def _reg_only(self, keys):
+        """Every picture of the step is a regularisation one (the watch leaves those alone)."""
+        keys = [str(k) for k in (keys if isinstance(keys, (list, tuple)) else [keys]) if k is not None]
+        return bool(self.reg) and bool(keys) and all(k in self.reg for k in keys)
+
+    # ---- Batch Size above 1: each picture its own weight and record, as its own step would have them (the driver
+    # hands back each picture's loss, info["per"] - the idea from @Murf-Code's Fizgig Advanced) ------------------
+    def weigh(self, info, keys, reg_keys=(), reg_mult=1.0):
+        """(loss to backpropagate, the step's recorded loss, kept indices) for a batched step: each picture at its
+        per-image LR / look warm-up (a regularisation picture at reg_mult), an excluded one at 0 and left out of the
+        average and the records; None when the step has no per-picture losses."""
+        per = info.get("per") if isinstance(info, dict) else None
+        keys = [str(k) for k in keys or []]
+        if per is None or len(keys) < 2 or int(per.shape[0]) != len(keys):
+            return None
+        raw = info.get("per_raw") or [float(x) for x in per.detach().float().cpu()]
+        out = [self.watch is not None and k not in self.reg and self.watch.is_excluded([k]) for k in keys]
+        kept = [i for i, o in enumerate(out) if not o]
+        mult = [0.0 if out[i] else float(reg_mult) if reg_keys and k in reg_keys else
+                (self.watch.multiplier([k]) if self.watch is not None else 1.0) for i, k in enumerate(keys)]
+        if all(m == 1.0 for m in mult):
+            scaled = per.mean()
+        else:
+            scaled = (per * torch.tensor(mult, device=per.device, dtype=per.dtype)).sum() / max(1, len(kept))
+        return scaled, torch.tensor(sum(raw[i] for i in kept) / max(1, len(kept))), kept
+
+    def observe_each(self, epoch, step, keys, ts, raw, kept):
+        """One record per kept picture of a batched step, with its own t and raw loss."""
+        if self.watch is None:
+            return
+        for i in kept:
+            if str(keys[i]) in self.reg:     # a regularisation picture: not recorded
+                continue
+            self.watch.observe(epoch=epoch, step=step, item_keys=[str(keys[i])], timestep=float(ts[i]),
+                               loss=float(raw[i]))
 
     # ---- epoch boundary --------------------------------------------------------------------------------
     def boundary(self, epoch, dit, device, parkable=True):
@@ -272,7 +330,10 @@ class Watch:
     def _recaption(self, auto, items, device):
         """Caption the stuck images with the shared captioner (Krea 2's Qwen3-VL-4B, loaded for the call and freed
         before the family's encoder loads). Writes each .txt and returns (key, item, caption, attempt) rows to
-        re-encode. A captioner that does not fit the card turns auto-recaption off for the run."""
+        re-encode. A captioner that does not fit the card turns auto-recaption off for the run.
+
+        Only this model, loaded directly: the Captions tab's other captioners (fizgig/captioners/) never load in a run,
+        so the training memory plans only ever fit around Qwen3-VL (the rule in fizgig/captioners/__init__.py)."""
         from fizgig.krea2.embedder import generate_caption
         from fizgig.krea2.utils import load_krea2_text_encoder
         try:

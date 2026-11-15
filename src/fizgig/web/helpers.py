@@ -137,7 +137,10 @@ def _needs(desc, job, prefs):
     for role in ("dit", "vae") if job.get("conds") else ("dit", "vae", "text_encoder"):
         f = next((m for m in desc.model_files if m.role == role), None)
         if f is not None:
-            out.append((f.label, s.pref_path(prefs, f.pref_key), f))
+            p = s.pref_path(prefs, f.pref_key)
+            if not p and not f.required and getattr(f, "inside", ""):
+                continue                 # left empty: read from the file it's inside (SDXL's checkpoint)
+            out.append((f.label, p, f))
     sp = desc.preview_speed()
     if sp is not None and float(job.get("turbo") or 0) > 0 and sp.pref_key:
         f = next((m for m in desc.model_files if m.pref_key == sp.pref_key), None)
@@ -2358,12 +2361,26 @@ def _probe(family, shas):
         want = shas.get(stage)
         if not want:
             return {"ok": False, "why": "the run has no cache step for it", "files": files}
+        if want == shas.get("dit") and "dit" in files:
+            # made from the model's own file (SDXL's checkpoint holds its VAE and encoders): that file, never a
+            # separate VAE / encoder this computer has set (_same_as_dit, once the model is here)
+            files[stage] = {**files["dit"], "same_as": "dit"}
+            continue
         f, got = pick(role, want)
         if got is None:
             return {"ok": False, "files": files, "why": f"this run's {f.label if f else role} isn't one it can "
                                                         f"download (not in {desc.display_name}'s list of builds)"}
         files[stage] = got
     return {"ok": True, "files": files}
+
+
+def _same_as_dit(desc, specs, paths):
+    """The cache steps the lead made from the model's own file take this computer's copy of it."""
+    f = next((m for m in desc.model_files if m.role == "dit"), None)
+    dit = paths.get("dit") or (_srv().pref_path(_srv().load_prefs(), f.pref_key) if f is not None else "")
+    for stage, spec in specs.items():
+        if spec.get("same_as") == "dit" and not paths.get(stage) and dit:
+            paths[stage] = dit
 
 
 _gets = {}                         # repo/path -> this computer fetching a build for a share: {state, error}
@@ -2501,6 +2518,8 @@ def _share_start(body):
     m = models(desc.key, {"conds": not make or "text" in paths, "turbo": 0, "look": 0}, fetch=True)
     if m["missing"]:
         return {"models": m}
+    if make:
+        _same_as_dit(desc, specs, paths)
     old = _sw.get(tag)
     if old and old["proc"].poll() is None:
         return {"ok": True, "dir": old["dir"]}
@@ -3628,7 +3647,15 @@ MOVED_FILE = ".fizgig_moved.json"     # in the run's output folder here while it
 # the folders and files a run names besides its training folder: they go with it (dirs/<key>/<its name>/...,
 # files/<key>/<name>) and come back the same way, so every LoRA kind moves
 _MOVE_DIRS = ("FAMILY_CONCEPT_DIR", "FAMILY_CONCEPT_DIR3", "FAMILY_CONCEPT_DIR4", "FAMILY_EDIT_DIR",
-              "FAMILY_EDIT_EXTRAS_DIR", "FAMILY_SLIDER_DIR")
+              "FAMILY_EDIT_EXTRAS_DIR", "FAMILY_SLIDER_DIR", "FAMILY_REG_DIR")
+
+
+def _move_names(values, k):
+    """The run names this folder or file: set, not "off", and - the Subjects card's regularisation folder - with its
+    tick on (a path left in the greyed box neither goes with the run nor stops it moving)."""
+    if k == "FAMILY_REG_DIR" and not (values or {}).get("FAMILY_REG_ON"):
+        return False
+    return str((values or {}).get(k) or "").strip().lower() not in ("", "off")
 _MOVE_FILES = ("FAMILY_EDIT_REF", "SAMPLE_REFERENCE", "METADATA_THUMBNAIL")
 
 
@@ -3644,7 +3671,7 @@ def _caption_ext(values):
 
 def _move_extras(values):
     """The run's other folders and files that are there: ({key: folder}, {key: file})."""
-    dirs = {k: str(values.get(k) or "").strip() for k in _MOVE_DIRS}
+    dirs = {k: str(values.get(k) or "").strip() for k in _MOVE_DIRS if _move_names(values, k)}
     files = {k: str(values.get(k) or "").strip() for k in _MOVE_FILES}
     files = {k: f for k, f in files.items() if f.lower() != "off"}      # Thumbnail "off": none, not a file
     return ({k: d for k, d in dirs.items() if d and os.path.isdir(d)},
@@ -3657,7 +3684,8 @@ def _run_subfolders(folder, values):
     training share as a sub-folder does."""
     from fizgig.families import launch
     subs = launch.subfolders(folder, (str(values.get("LORA_OUTPUT_DIR") or ""),
-                                      str(values.get("FAMILY_FT_REG_DIR") or ""))) \
+                                      str(values.get("FAMILY_FT_REG_DIR") or ""),
+                                      str(values.get("FAMILY_REG_DIR") or ""))) \
         if (values or {}).get("TRAIN_SUBFOLDERS") else []
     from fizgig.dataset import detail_crops
     if not detail_crops.is_on(folder):
@@ -3830,7 +3858,7 @@ def _mv_client():
     return Client(_mv["url"], (h or {}).get("cookie", "") or _mv.get("cookie", ""))
 
 
-def move_start(hid, now=False, home=True):
+def move_start(hid, now=False, home=True, batch=False):
     if _mv.get("state") in ("moving", "back", "moved"):
         raise ValueError("This run is already moving, or training elsewhere.")
     h = next((x for x in _helpers() if x.get("id") == hid), None)
@@ -3856,7 +3884,7 @@ def move_start(hid, now=False, home=True):
     v = dict(r["values"] or {})
     if desc is None or r["family"] == s.refmod.KEY or r["resume_mode"] == "ft" or s.form._kind(desc, v) == "finetune":
         raise ValueError("A fine-tune or a RefMod can't move: LoRA runs move (standard, edit and slider).")
-    gone = [k for k in _MOVE_DIRS + _MOVE_FILES if str(v.get(k) or "").strip().lower() not in ("", "off") and not (
+    gone = [k for k in _MOVE_DIRS + _MOVE_FILES if _move_names(v, k) and not (
         os.path.isdir(str(v[k]).strip()) if k in _MOVE_DIRS else os.path.isfile(str(v[k]).strip()))]
     if gone:
         raise ValueError(f"It names {str(v[gone[0]]).strip()}, which isn't on this computer any more, so it can't "
@@ -3864,8 +3892,10 @@ def move_start(hid, now=False, home=True):
     if now and running and not s.launch.latest_state(r["output_dir"], r["lora"]):
         raise ValueError("It hasn't saved yet, so it can't move now: move it at the end of this epoch instead.")
     _mv.clear()
+    batch = bool(batch) and not s.form.batch_blockers(desc, v)
     _mv.update(state="moving", hid=hid, to=h.get("name") or h["url"], url=h["url"], run=r["lora"],
-               out_dir=r["output_dir"], error="", text="Getting ready to move", progress=None, home=bool(home))
+               out_dir=r["output_dir"], error="", text="Getting ready to move", progress=None, home=bool(home),
+               batch=batch)
     threading.Thread(target=_move_work, args=(h, now), daemon=True, name="helpers-move").start()
     return {"ok": True}
 
@@ -4010,6 +4040,7 @@ def _move_work(h, now):
         body = {"tag": tag, "family": fam, "values": values, "run": name, "state": os.path.basename(state),
                 "folder": os.path.basename(os.path.normpath(folder)) or "images", "lead": socket.gethostname(),
                 "precision": setup.get("precision") or "", "files": pr.get("files") or {},
+                "batch": bool(_mv.get("batch")),
                 "dirs": {k: _dir_name(d) for k, d in _move_extras(values)[0].items()},
                 "extra_files": {k: os.path.basename(f) for k, f in _move_extras(values)[1].items()}}
         _mv_say(f"{to} is getting the run ready")
@@ -4031,14 +4062,14 @@ def _move_work(h, now):
         _write(os.path.join(out_dir, MOVED_FILE), {"url": _mv["url"], "to": to, "tag": tag, "run": name,
                                                    "remote_out": a.get("output_dir") or "", "at": time.time(),
                                                    "family": fam, "values": values, "image_folder": folder,
-                                                   "home": bool(_mv.get("home"))})
+                                                   "home": bool(_mv.get("home")), "batch": int(a.get("batch") or 1)})
         _moved_record(_mv["url"], name, a.get("output_dir") or "", out_dir)
         if _mv.get("home"):                  # its checkpoints and previews come home as they're saved, queued
             _home_for_move(_mv["url"], out_dir)
         with s._lock:
             s._run["state"] = "moved"
         _mv.update(state="moved", tag=tag, remote_out=a.get("output_dir") or "", remote=None, family=fam,
-                   values=values, image_folder=folder)
+                   values=values, image_folder=folder, batch=int(a.get("batch") or 1))
         _mv_say(f"Training on {to} now, from {os.path.basename(state)}. Bring it back from the run card when you "
                 f"want it here again")
         threading.Thread(target=_move_watch, daemon=True, name="helpers-move-watch").start()
@@ -4092,7 +4123,8 @@ def move_restore(out_dir, name):
     _mv.clear()
     _mv.update(state="moved", to=m.get("to"), url=m.get("url"), tag=m.get("tag"), run=name, out_dir=out_dir,
                remote_out=m.get("remote_out"), remote=None, text=f"Training on {m.get('to')}", progress=None,
-               family=m.get("family"), values=m.get("values") or {}, image_folder=m.get("image_folder") or "")
+               family=m.get("family"), values=m.get("values") or {}, image_folder=m.get("image_folder") or "",
+               batch=int(m.get("batch") or 1))
     threading.Thread(target=_move_watch, daemon=True, name="helpers-move-watch").start()
     return True
 
@@ -4141,7 +4173,7 @@ def move_in(body):
         raise ValueError("Bad tag.")
     rec = _mvin_load().get(tag)
     if rec and rec.get("started"):
-        return {"ok": True, "output_dir": rec["output_dir"], "run": rec["run"]}
+        return {"ok": True, "output_dir": rec["output_dir"], "run": rec["run"], "batch": rec.get("batch", 1)}
     with s._lock:
         busy = s._run["proc"] is not None and s._run["proc"].poll() is None or s._run["state"] in ("starting", "running")
         paused = s._run["state"] == "paused"
@@ -4163,13 +4195,15 @@ def move_in(body):
                 return {"models": wait}
             paths[stage] = got
     try:
-        turbo = float(str(v.get("FAMILY_TURBO_STRENGTH") or 0).strip() or 0)
+        from fizgig.families.form import turbo_ticked_off
+        turbo = 0.0 if turbo_ticked_off(desc, v) else float(str(v.get("FAMILY_TURBO_STRENGTH") or 0).strip() or 0)
     except ValueError:
         turbo = 0.0
     m = models(desc.key, {"conds": "text" in paths, "turbo": turbo, "look": 1 if v.get("FAMILY_PREVIEW_LOOK") else 0},
                fetch=True)
     if m["missing"]:
         return {"models": m}
+    _same_as_dit(desc, body.get("files") or {}, paths)
     name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(body.get("run") or "run")).strip("._")[:80] or "run"
     for old in glob.glob(_dir("files", "mv*.tar")):      # an earlier attempt's file that never became a run
         if os.path.basename(old) != f"mv{tag}.tar" and time.time() - os.path.getmtime(old) > 3600:
@@ -4218,11 +4252,33 @@ def move_in(body):
         v["CONTEXT_LORA_PATH"] = os.path.join(rec["base"], "context.safetensors")
         if not os.path.isfile(v["CONTEXT_LORA_PATH"]):
             raise ValueError("The run's context LoRA didn't arrive: move it again.")
+    rec["batch"] = 1
+    if body.get("batch") and not s.form.batch_blockers(desc, v):
+        # Batch size as this card fits at the run's precision with no more swap than one picture a step (the trainer
+        # carries the LR schedule on from its epochs; bringing it back resumes at home's own Batch size)
+        from fizgig.web import batch_plan
+        prefs = s.load_prefs()
+        sent = {f.pref_key: paths[st] for st, role in (("dit", "dit"), ("latents", "vae"), ("text", "text_encoder"))
+                for f in desc.model_files if f.role == role and paths.get(st)}     # the files the run came with
+        rec["batch"] = batch_plan.fit(desc, v, s.gpu_env(dict(os.environ, PYTHONPATH=os.path.join(s.BASE_DIR, "src")),
+                                                         prefs),
+                                      files=batch_plan.models(desc, lambda k: sent.get(k) or s.pref_path(prefs, k)))
+        if rec["batch"] > 1 and desc.batch_auto:
+            # a model with a measured fastest batch (Batch size Auto's) takes that, not the largest that fits: past it
+            # a picture trains no faster and the memory is better spent going without checkpointing
+            try:
+                mp = float(v.get("DATASET_MEGAPIXELS") or 1.0)
+            except (TypeError, ValueError):
+                mp = 1.0
+            rec["batch"] = min(rec["batch"], max(1, desc.auto_batch(mp)))
+        if rec["batch"] > 1:
+            v["BATCH_SIZE"] = str(rec["batch"])
     over = {}
     for stage, role in (("dit", "dit"), ("latents", "vae"), ("text", "text_encoder")):
         f = next((mf for mf in desc.model_files if mf.role == role), None)
         if f is not None and paths.get(stage):
             over[f.pref_key] = paths[stage]
+    v["__moved_in"] = "1"          # this run came by a move: the start-up question leaves it alone (server.py)
     r = s._start(desc.key, v, rec["folder"], resume=state, models=over,
                  note=f"=== Moved here from {rec.get('lead') or 'another computer'}: carrying on from "
                       f"{os.path.basename(state)} ===")
@@ -4230,8 +4286,9 @@ def move_in(body):
         raise ValueError(r.get("error") or "; ".join(r.get("problems") or ["it couldn't start"]))
     rec["started"] = True
     _mvin_save()
-    logger.info(f"[move] {rec['run']} moved here from {rec.get('lead')}: resuming from {os.path.basename(state)}")
-    return {"ok": True, "output_dir": rec["output_dir"], "run": rec["run"]}
+    logger.info(f"[move] {rec['run']} moved here from {rec.get('lead')}: resuming from {os.path.basename(state)}"
+                + (f", {rec['batch']} pictures a step" if rec["batch"] > 1 else ""))
+    return {"ok": True, "output_dir": rec["output_dir"], "run": rec["run"], "batch": rec["batch"]}
 
 
 def move_out(body):

@@ -3,12 +3,12 @@
 Fizgig Installer
 ================
 Sets up Fizgig with its own Python virtual environment.
-Installs PyTorch built against CUDA 12.8 — required for Klein 9B and Krea 2 training,
+Installs PyTorch built against CUDA 13.4 — required for Klein 9B and Krea 2 training,
 preview rendering, profiling, extraction, and Repair Studio on NVIDIA GPUs.
 
 Features:
 - Creates isolated venv for Fizgig dependencies
-- Installs CUDA 12.8 PyTorch (supports RTX 30xx / 40xx / 50xx Blackwell)
+- Installs CUDA 13.4 PyTorch (supports RTX 30xx / 40xx / 50xx Blackwell)
 - Installs InsightFace face detection (runs on CPU for GPU independence)
 - Downloads face detection models automatically
 - Installs Florence-2 AI captioning (transformers library; runs on GPU)
@@ -23,10 +23,11 @@ import sys
 import subprocess
 import platform
 import shutil
+import time
 from pathlib import Path
 
 # Minimum Python version required
-MIN_PYTHON_VERSION = (3, 10)
+MIN_PYTHON_VERSION = (3, 11)   # PyTorch 2.15 has no Python 3.10 wheels
 
 # Directory paths
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -198,8 +199,29 @@ def _remove_venv(venv_dir=None):
         return False
 
 
+REBUILD = "--rebuild" in sys.argv[1:]     # the updater's R: delete the venv without asking, then install fresh
+
+
+def _remove_venv_for_rebuild():
+    """The updater hands over to this installer and exits; on Windows its python.exe stays locked for a moment, so
+    keep trying for up to a minute before giving up with the usual plain-language message."""
+    for _ in range(30):
+        try:
+            shutil.rmtree(VENV_DIR)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(2)
+    return _remove_venv()
+
+
 def create_venv():
     """Create virtual environment"""
+    if VENV_DIR.exists() and REBUILD:
+        print(f"Rebuilding: removing the old virtual environment at {VENV_DIR} ...")
+        if not _remove_venv_for_rebuild():
+            return False
     if VENV_DIR.exists():
         print(f"Virtual environment already exists at: {VENV_DIR}")
         health = venv_health()
@@ -365,36 +387,26 @@ else:
 
 
 def download_insightface_models():
-    """Trigger InsightFace model download by running a test detection"""
+    """The face models: InsightFace's face finder (its detector + gender/age files only) and AdaFace ViT, the
+    likeness model (face_utils.ensure_face_models: pinned, checksummed). Never fatal: they also fetch on first use."""
     python_path = get_python_path()
 
-    print("Downloading InsightFace models (buffalo_l)...")
-    print("(First-time download, ~300MB)")
+    print("Downloading the face models (face finder + AdaFace ViT likeness model, ~0.5 GB)...")
 
-    # Python script to download models
-    download_script = '''
+    download_script = f'''
 import os
 import sys
-
-# Suppress TensorFlow warnings
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")   # no onnxruntime telemetry (Linux builds 1.29+)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
+sys.path.insert(0, {str(SCRIPT_DIR / "src")!r})
 try:
-    from insightface.app import FaceAnalysis
-
-    print("Initializing FaceAnalysis (this downloads models)...")
-    app = FaceAnalysis(
-        name='buffalo_l',
-        allowed_modules=['detection', 'genderage', 'recognition'],
-        providers=['CPUExecutionProvider']
-    )
-    app.prepare(ctx_id=-1)  # -1 = CPU only
-    print("Models downloaded successfully!")
-    sys.exit(0)
+    from fizgig.face_utils import ensure_face_models
+    ensure_face_models()
+    print("Face models ready.")
 except Exception as e:
-    print(f"Warning: Could not download models: {e}")
-    print("Models will be downloaded on first use.")
-    sys.exit(0)  # Don't fail installation
+    print(f"Warning: Could not download the face models: {{e}}")
+    print("They will download on first use.")
+sys.exit(0)  # Don't fail installation
 '''
 
     try:
@@ -458,7 +470,7 @@ def print_summary():
         print("  Run: ./launch_fizgig.sh  (its own window)  or  ./launch_fizgig_browser.sh  (in your web browser)")
 
     print("\nFace Detection:")
-    print("  - InsightFace models will download on first use (~300MB)")
+    print("  - Face finder + AdaFace ViT likeness model (~0.5 GB, downloaded above or on first use)")
     print("  - Uses CPU for detection (works on any GPU)")
     print("  - Supports gender classification for face filtering")
     print("  - Furry / anime: pick a YOLO face model on the Image Prep tab (docs/FACE_BACKENDS.md)")
@@ -466,7 +478,7 @@ def print_summary():
     print("\nAI Captioning (Florence-2):")
     print("  - Florence models auto-download from Hugging Face on first use")
     print("  - Model sizes: base (~500MB), large (~1.5GB)")
-    print("  - Runs on GPU via CUDA 12.8 PyTorch (fast)")
+    print("  - Runs on GPU via CUDA 13.4 PyTorch (fast)")
 
     print("\n" + "=" * 60)
 
@@ -603,6 +615,12 @@ def main():
 
     # Print summary
     print_summary()
+    if REBUILD and platform.system() == "Windows":
+        # the updater opened this in its own window; keep it open so the result can be read
+        try:
+            input("Rebuild finished. Press Enter to close this window.")
+        except EOFError:
+            pass
 
 
 if __name__ == "__main__":
