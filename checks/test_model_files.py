@@ -72,6 +72,26 @@ def test_every_catalog_weight_keeps_its_model_file_signature():
     assert {key: tuple(weights[key].signature) for key in signed if key in weights} == signed
 
 
+def test_all_fetches_every_catalog_family_and_the_helpers(monkeypatch):
+    """--all is every family the catalog declares, read when it runs: a family added to it is included."""
+    import sys
+    import pytest
+    asked = {}
+
+    def fetch(families, **_):
+        asked["families"] = families
+        return True
+
+    monkeypatch.setattr(fm, "FAMILIES", {**fm.FAMILIES, "future_family": []})
+    monkeypatch.setattr(fm, "fetch", fetch)
+    monkeypatch.setattr(sys, "argv", ["fetch_models", "--all", "--dry-run"])
+    with pytest.raises(SystemExit) as done:
+        fm.main()
+    assert done.value.code == 0
+    assert sorted(asked["families"]) == sorted([*fm.FAMILIES, "tools"])
+    assert "future_family" in asked["families"]
+
+
 def test_files_it_cannot_tell_apart_are_left_alone(tmp_path):
     """A file without the tensor (another format), an unreadable one, or the right one: no change."""
     other = tmp_path / "diffusers_vae.safetensors"

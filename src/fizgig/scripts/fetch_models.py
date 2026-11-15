@@ -164,7 +164,7 @@ def _weight_from_file(f):
 
 def _described_families():
     """Families added through the standard layer (fizgig.families): their download lists come from their
-    descriptions (model_files), never from a hand-written list here. Not part of --all (opt-in)."""
+    descriptions (model_files), never from a hand-written list here."""
     try:
         sys.path.insert(0, os.path.join(REPO_DIR, "src"))
         from fizgig.families.registry import FAMILIES as _REG
@@ -726,7 +726,8 @@ def main():
         description="Download Fizgig's model files and write them into Preferences.")
     p.add_argument("--family", action="append", choices=["klein", "minimax", "tools", *DESCRIBED],
                    help="Repeatable. Krea 2 needs no HF account; Klein is gated.")
-    p.add_argument("--all", action="store_true", help="Every family, including the helper models.")
+    p.add_argument("--all", action="store_true",
+                   help="Every family in the download catalog, including the helper models.")
     p.add_argument("--include-optional", action="store_true",
                    help="Also fetch the optional files (Krea 2 Turbo DiT ~13 GB, MiniMax ref2va DiT ~21 GB, "
                         "SDXL's separate VAE, Anima's Turbo LoRA).")
@@ -753,7 +754,7 @@ def main():
         except Exception:
             pass
 
-    families = ["krea2", "klein", "minimax", "tools"] if a.all else (a.family or [])
+    families = [*FAMILIES, "tools"] if a.all else (a.family or [])
     if not families:
         p.error("pick --family krea2|klein|tools (repeatable), or --all")
 
