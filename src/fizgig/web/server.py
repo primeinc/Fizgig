@@ -2747,73 +2747,18 @@ _fetch = {"proc": None, "state": "idle", "family": "", "file": "", "done": 0, "t
           "then_start": None}           # (family, values, image folder): Start pressed before the model was here
 
 
-_model_search = {"state": "idle", "family": "", "processed": 0, "total": 0,
-                 "found": 0, "kept": 0, "missing": 0, "ambiguous": 0, "results": [], "error": ""}
+from fizgig.web import model_discovery as _fork_model_discovery
+
+# Retain the server's established internal API and mutable state seam.
+_model_search = _fork_model_discovery.STATE
 
 
 def _model_search_status():
-    with _lock:
-        return {**_model_search, "results": list(_model_search["results"])}
+    return _fork_model_discovery.status(sys.modules[__name__])
 
 
 def _start_model_search(family="", choices=None):
-    """Search local files on a worker without downloading; preserve explicit paths and edits."""
-    from fizgig.scripts import fetch_models
-    family = str(family or "").strip()
-    if family and family not in fetch_models.FAMILIES:
-        raise ValueError("Unknown model family.")
-    allowed = {f.pref_key for d in training_families() for f in d.model_files if f.fetch_choice}
-    choices = {str(k): v for k, v in (choices or {}).items() if k in allowed and v in ("main", "alt")}
-    weights = list(fetch_models.discovery_candidates((family,) if family else None, choices=choices))
-    with _lock:
-        if _model_search["state"] == "running":
-            raise ValueError("A local model search is already running.")
-        if _fetch["proc"] is not None and _fetch["proc"].poll() is None:
-            raise ValueError("A model download is running; search after it finishes.")
-        _model_search.update(state="running", family=family, processed=0, total=len(weights),
-                             found=0, kept=0, missing=0, ambiguous=0, results=[], error="")
-
-    def work():
-        prefs = load_prefs()
-        updates = {}
-        scan_cache = {}  # walk each configured model library at most once per search
-        try:
-            for w in weights:
-                result = fetch_models.find_weight(w, user_data.MODELS_DIR, prefs, scan_cache=scan_cache,
-                                                  allow_alternates=True)
-                current = str(prefs.get(w.pref_key) or "").strip()
-                if result is fetch_models.model_sources.AMBIGUOUS:
-                    status, path = "ambiguous", ""
-                elif not result:
-                    status, path = "missing", ""
-                elif current and os.path.isfile(pref_path(prefs, w.pref_key)) and not (
-                        w.switch_from and os.path.basename(current) == w.switch_from) and (
-                        os.path.basename(current) not in w.replaces):
-                    status, path = "kept", current
-                else:
-                    status, path = "found", os.path.abspath(result)
-                    updates[w.pref_key] = path
-                with _lock:
-                    _model_search[status] += 1
-                    _model_search["processed"] += 1
-                    _model_search["results"].append({"key": w.pref_key, "status": status, "path": path})
-            if updates:
-                with _lock:
-                    latest = load_prefs()
-                    # A user who changed a path mid-search has final say.
-                    safe = {k: v for k, v in updates.items()
-                            if str(latest.get(k) or "").strip() == str(prefs.get(k) or "").strip()}
-                    if safe:
-                        latest.update(safe)
-                        _write_json(PREFS_FILE, latest)
-            with _lock:
-                _model_search["state"] = "done"
-        except Exception as e:
-            logger.exception("Local model discovery")
-            with _lock:
-                _model_search.update(state="failed", error=f"{type(e).__name__}: {e}")
-
-    threading.Thread(target=work, name="fizgig-model-discovery", daemon=True).start()
+    return _fork_model_discovery.start(family, choices, core=sys.modules[__name__])
 
 
 def _only_downloads(desc, problems):
