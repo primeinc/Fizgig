@@ -27,5 +27,9 @@ jobs:
         run: python -m compileall -q src
       - name: Web UI scripts parse (recursive, including fork extensions)
         run: python checks/js_parse_gate.py
+      - name: Validate callable signatures against current canonical upstream
+        run: |
+          git fetch --no-tags --depth=1 https://github.com/shootthesound/Fizgig.git refs/heads/master
+          python checks/upstream_signature_gate.py --upstream-ref FETCH_HEAD
       - name: Checks
         run: python -m pytest checks -q
