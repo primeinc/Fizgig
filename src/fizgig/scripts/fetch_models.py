@@ -463,11 +463,103 @@ def repair_links(prefs, models_dir, log=print):
 
 
 def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, scan_cache=None, repo_dir=None):
-    """Use the fork's shared-library resolver without changing public callers."""
-    from fizgig.fork import model_resolver
-    return model_resolver.fetch_weight(
-        w, models_dir, prefs, token=token, log=log, dry_run=dry_run,
-        scan_cache=scan_cache, repo_dir=repo_dir, core=sys.modules[__name__])
+    """Download one weight if needed and point its pref at it. Returns True if usable."""
+    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
+    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+
+    # A pref the user already set, pointing at a file that exists, is LEFT ALONE — existence is
+    # the only test. Deliberately not the size check below: that exists to catch a transfer WE
+    # just made being truncated, and applying it here would second-guess legitimate choices.
+    # Plenty are smaller than the file this manifest names — the fp8_scaled RAW DiT instead of
+    # bf16, Klein's fp8mixed text encoder instead of the full one, a community fine-tune — and
+    # every one of those would have been "too small", silently re-downloaded, and the user's
+    # path overwritten with ours.
+    current = _configured_file(prefs.get(w.pref_key), repo_dir)
+    if current:
+        log(f"  [keep] {w.pref_key} -> {current} (existing configured model; no download)")
+        return True
+
+    # the same file set for another model (any name: the user's own copy, e.g. ComfyUI's renamed VAE): linked, not fetched
+    same_as = getattr(w, "same_as", "")
+    other = str(prefs.get(same_as) or "").strip() if same_as else ""
+    if _configured_file(other, repo_dir):
+        log(f"  [have] {w.filename} — already set for another model ({os.path.basename(other)}), linking into "
+            "Preferences")
+        prefs[w.pref_key] = str(prefs.get(same_as))
+        return True
+
+    found = find_weight(w, models_dir, prefs, scan_cache=scan_cache, repo_dir=repo_dir)
+    if found is model_sources.AMBIGUOUS:
+        log(f"  [ambiguous] {w.filename} — equally strong local files; choose the correct file in Preferences.")
+        return False
+    if found:
+        log(f"  [have] {w.filename} — {found}, linking into Preferences")
+        prefs[w.pref_key] = found
+        return True
+
+    # A populated Preferences row is a user selection. If it no longer exists and
+    # discovery found nothing, do not silently turn it into a multi-GB download.
+    # Clearing that row explicitly is how the user authorises a fresh download.
+    configured = str(prefs.get(w.pref_key) or "").strip()
+    if configured:
+        log(f"  [stale] {w.pref_key}: saved file not found: {configured}")
+        log("          Searched your saved model directories and caches; no match. "
+            "Correct or clear the Preferences path before downloading.")
+        return False
+
+    try:
+        download_parent, dest = model_destinations.destination(w, models_dir, prefs)
+    except ValueError as error:
+        log(f"  [fail] {w.filename}: {error}")
+        return False
+    if dry_run:
+        log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
+        return True
+    if w.gated and not (token or os.environ.get("HF_TOKEN", "").strip()):
+        log(f"  [gated] {w.filename} is missing locally; {w.repo} needs a Hugging Face token.")
+        return False
+
+    log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
+    try:
+        os.makedirs(download_parent, exist_ok=True)
+        if EMIT_PROGRESS:
+            got = _download_with_progress(w, download_parent, token, log)
+        else:
+            from fizgig.utils import hf_public
+            got = hf_public.download(repo_id=w.repo, filename=w.path_in_repo, local_dir=download_parent,
+                                     token=token or os.environ.get("HF_TOKEN") or None, log=log)
+    except Exception as e:
+        name = type(e).__name__
+        from fizgig.utils import hf_public
+        if isinstance(e, hf_public.LoginExpired):
+            log(f"  [login] {w.filename}: {e}")
+        elif "Gated" in name or "401" in str(e) or "403" in str(e):
+            log(f"  [gated] {w.repo} needs you to accept its licence first:")
+            log(f"          https://huggingface.co/{w.repo}")
+            log(f"          Then re-run with --token hf_... (or set HF_TOKEN).")
+        else:
+            log(f"  [fail] {w.filename}: {name}: {e}")
+        return False
+
+    # Validate the downloaded artifact before moving it into another application's library.
+    got = os.path.abspath(got)
+    if not _valid_safetensors(got, min_bytes):
+        log(f"  [fail] {w.filename} downloaded but failed verification — leaving it for a re-run")
+        return False
+    if os.path.normcase(got) != os.path.normcase(dest):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(got, dest)
+        d = os.path.dirname(got)
+        while os.path.normcase(d) != os.path.normcase(download_parent):
+            try:
+                os.rmdir(d)
+            except OSError:
+                break
+            d = os.path.dirname(d)
+
+    prefs[w.pref_key] = dest
+    log(f"  [done] {w.filename}")
+    return True
 
 
 def fetch_tool(spec, log=print, dry_run=False):
