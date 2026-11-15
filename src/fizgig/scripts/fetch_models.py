@@ -379,28 +379,15 @@ def _configured_file(value, repo_dir=None):
     return os.path.abspath(path) if os.path.isfile(path) else ""
 
 
-def _superseded_selection(w, value):
-    """The upstream build selector/replaces contract, based on *declared* model metadata.
-
-    An explicit build choice must replace a file whose name matches the other
-    build. Retired upstream filenames similarly must not block the new target.
-    A user-picked file with any other name remains authoritative.
-    """
-    name = os.path.basename(str(value or "").strip())
-    return bool(name and (
-        (getattr(w, "switch_from", "") and name == w.switch_from)
-        or name in getattr(w, "replaces", ())
-    ))
-
-
 def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alternates=False):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
-    A user-picked alternate build and replacement for a retired filename are exceptions:
-    the previous file must not suppress the newly chosen build.
+    The fork's explicit-path policy takes precedence over upstream switch_from/replaces
+    hints. A valid configured file stays selected until the user clears the row.
+    Discovery can find alternate builds only when a model is otherwise unresolved.
     """
     current = _configured_file(prefs.get(w.pref_key), repo_dir)
-    if current and not _superseded_selection(w, current):
+    if current:
         return current
     other_key = getattr(w, "same_as", "")
     other = str(prefs.get(other_key) or "").strip() if other_key else ""
@@ -525,15 +512,10 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
     # bf16, Klein's fp8mixed text encoder instead of the full one, a community fine-tune — and
     # every one of those would have been "too small", silently re-downloaded, and the user's
     # path overwritten with ours.
-    selected_path = str(prefs.get(w.pref_key) or "").strip()
-    current = _configured_file(selected_path, repo_dir)
-    superseded = _superseded_selection(w, selected_path)
-    if current and not superseded:
+    current = _configured_file(prefs.get(w.pref_key), repo_dir)
+    if current:
         log(f"  [keep] {w.pref_key} -> {current} (existing configured model; no download)")
         return True
-    if current and superseded:
-        log(f"  [pick] {w.pref_key}: {os.path.basename(current)} -> {w.filename} "
-            "(build choice or upstream replacement)")
 
     # the same file set for another model (any name: the user's own copy, e.g. ComfyUI's renamed VAE): linked, not fetched
     same_as = getattr(w, "same_as", "")
@@ -557,7 +539,7 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False, sca
     # discovery found nothing, do not silently turn it into a multi-GB download.
     # Clearing that row explicitly is how the user authorises a fresh download.
     configured = str(prefs.get(w.pref_key) or "").strip()
-    if configured and not superseded:
+    if configured:
         log(f"  [stale] {w.pref_key}: saved file not found: {configured}")
         log("          Searched your saved model directories and caches; no match. "
             "Correct or clear the Preferences path before downloading.")
@@ -679,8 +661,11 @@ def fetch_tool(spec, log=print, dry_run=False):
 
 
 def _chosen(w, choices):
-    """The build to fetch for a file with a choice: {pref_key: "main" | "alt"} picks one and lets it replace the other
-    (so a pref on the other moves); without a pick, the main file as before, the user's own file kept."""
+    """Select the proposed download build, without overriding an existing user path.
+    The web page sends a choice for each select even when the user did not
+    intentionally change it. Only clearing the saved path authorizes a new download.
+    The upstream switch_from metadata is retained for catalog provenance, not as
+    permission to replace a fork user's configured file."""
     pick = (choices or {}).get(getattr(w, "pref_key", ""))
     if getattr(w, "alt", None) is None or not getattr(w, "fetch_choice_enabled", True) or pick not in ("main", "alt"):     # the strangers pack has no build to pick
         return w
