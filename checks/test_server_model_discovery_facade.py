@@ -6,14 +6,17 @@ def test_fork_model_discovery_state_is_shared_with_upstream_server():
     assert server._model_search is model_discovery.STATE
     with server._lock:
         original = dict(server._model_search)
-        try:
-            server._model_search.update(state="idle", results=[{"key": "probe", "status": "found"}])
-            status = server._model_search_status()
-            assert status["state"] == "idle"
-            assert status["results"][0]["key"] == "probe"
-            status["results"].append({"key": "mutated_response"})
-            assert len(server._model_search["results"]) == 1, "Status response leaked mutable state"
-        finally:
+        server._model_search.update(state="idle", results=[{"key": "probe", "status": "found"}])
+    try:
+        # status() owns its lock. The test must not call it while holding
+        # the same non-reentrant lock or the test itself deadlocks.
+        status = server._model_search_status()
+        assert status["state"] == "idle"
+        assert status["results"][0]["key"] == "probe"
+        status["results"].append({"key": "mutated_response"})
+        assert len(server._model_search["results"]) == 1, "Status response leaked mutable state"
+    finally:
+        with server._lock:
             server._model_search.clear()
             server._model_search.update(original)
 
