@@ -137,86 +137,13 @@ def test_h3_model_inventory_uses_canonical_file_list(tmp_path):
     assert data["summary"]["remaining_required_bytes"] > 0
 
 
-_NODE_TEST = r"""
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const vm = require("node:vm");
-
-const family = JSON.parse(fs.readFileSync(0, "utf8"));
-const source = fs.readFileSync("src/fizgig/web/static/app.js", "utf8");
-const start = source.indexOf("// ---- Model library: one family at a time");
-const end = source.indexOf("// Search libraries on the Fizgig computer", start);
-assert(start >= 0 && end > start, "Model library renderer must be present");
-
-function el(tag, attrs, ...kids) {
-  const isAttrs = attrs && typeof attrs === "object" && !Array.isArray(attrs);
-  const properties = isAttrs ? attrs : {};
-  const children = isAttrs ? kids : [attrs, ...kids].filter(x => x !== undefined);
-  const node = {
-    tag, props: properties, children: [],
-    append(...xs) { this.children.push(...xs.filter(x => x !== null && x !== undefined)); },
-    addEventListener() {},
-    querySelector() { return this; },
-    scrollIntoView() {}
-  };
-  node.append(...children);
-  return node;
-}
-
-const context = {
-  S: {prefs:{}, modelInventory:{files:{}}, mpRows:{}, fetchRows:{},
-      mpFilter:"all", mpQuery:""},
-  el, fetchRow: (_f) => el("section", {class:"fetch-row"}),
-  document: {querySelector:()=>null, querySelectorAll:()=>[]}
-};
-vm.createContext(context);
-vm.runInContext(source.slice(start, end), context, {timeout: 10000});
-
-function walk(root, predicate, results=[]) {
-  if (!root || typeof root !== "object") return results;
-  if (predicate(root)) results.push(root);
-  for (const child of root.children || []) walk(child, predicate, results);
-  return results;
-}
-const required = [
-  "minimax_image_dit", "minimax_image_vae",
-  "minimax_image_text_encoder", "minimax_image_training_adapter"
-];
-function rowsFor(f) {
-  const card = context.mpFamilyCard(f);
-  return walk(card, n => n.props && n.props["data-key"])
-    .map(n => n.props["data-key"]);
-}
-const rows = rowsFor(family);
-assert(required.every(k => rows.includes(k)), "Real H3 web card dropped a model row");
-const card = context.mpFamilyCard(family);
-const links = walk(card, n => n.tag === "a")
-  .map(n => n.props.href || "");
-assert(links.some(x => x.includes("minimax_h3_image_pruned_int8_convrot.safetensors")));
-assert(links.some(x => x.includes("minimax_h3_image_pruned_bf16.safetensors")));
-assert(links.some(x => x.includes("qwen3vl_32b_minimax_h3_bf16.safetensors")));
-assert(links.some(x => x.includes("fizgig_minimax_h3_image_training_adapter.safetensors")));
-const toolbar = context.mpToolbar([family], family);
-const options = walk(toolbar, n => n.tag === "option").map(n => n.props.value);
-assert(options.includes("minimax_image"), "H3 family absent from fork selector");
-
-// Negative control: the same rendered-row gate MUST detect a missing schema field.
-const broken = {...family, model_keys:family.model_keys.filter(k => k !== "minimax_image_vae")};
-assert(!required.every(k => rowsFor(broken).includes(k)), "Gate failed to detect a missing VAE row");
-console.log("H3 custom model UI rendered all model rows, primary and alternative links; negative control detected omission");
-"""
-
-
 def test_real_custom_ui_renderer_displays_h3_rows_and_alternates():
+    """One maintained JavaScript oracle covers actual H3 and unknown future families."""
     family = next(f for f in get_schema()["families"] if f["key"] == "minimax_image")
     result = subprocess.run(
-        ["node", "-e", _NODE_TEST],
-        cwd=ROOT,
-        input=json.dumps(family),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
+        ["node", "checks/model_library_contract.cjs"],
+        cwd=ROOT, input=json.dumps(family), text=True,
+        capture_output=True, check=False, timeout=30,
     )
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
-    assert "negative control detected omission" in result.stdout
+    assert "H3, future family" in result.stdout
