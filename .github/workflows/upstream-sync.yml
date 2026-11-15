@@ -11,6 +11,8 @@ on:
       - ".github/workflows/checks.yml"
       - "scripts/upstream_sync.py"
       - "checks/test_upstream_sync.py"
+      - "checks/upstream_signature_gate.py"
+      - "checks/test_upstream_signature_gate.py"
   pull_request:
     paths:
       - ".github/workflows/upstream-sync.yml"
@@ -75,6 +77,7 @@ jobs:
         run: |
           python -m compileall -q src
           python checks/js_parse_gate.py
+          python checks/upstream_signature_gate.py --upstream-ref "${{ steps.plan.outputs.upstream_sha }}"
           python -m pytest checks -q
       - name: Publish successful sync branch, open review PR and dispatch independent CI
         if: steps.plan.outputs.status == 'prepared' || steps.plan.outputs.status == 'existing_remote'
