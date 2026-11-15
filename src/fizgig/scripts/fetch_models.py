@@ -153,6 +153,7 @@ def _weight_from_file(f):
                optional=f.fetch_is_optional, gated=f.gated, local_name=f.local_name or None,
                replaces=f.replaces)
     w.same_as = f.same_as
+    w.signature = tuple(f.signature)
     if f.alt_repo and f.alt_path:
         w.alt = Weight(f.pref_key, f.alt_repo, f.alt_path, f.alt_size_gb or f.size_gb,
                        f"{f.label} — {f.alt_label or (f.fetch_choice[1] if f.fetch_choice else 'alternate')}",
@@ -163,7 +164,7 @@ def _weight_from_file(f):
 
 def _described_families():
     """Families added through the standard layer (fizgig.families): their download lists come from their
-    descriptions (model_files), never from a hand-written list here. Not part of --all (opt-in)."""
+    descriptions (model_files), never from a hand-written list here."""
     try:
         sys.path.insert(0, os.path.join(REPO_DIR, "src"))
         from fizgig.families.registry import FAMILIES as _REG
@@ -725,7 +726,8 @@ def main():
         description="Download Fizgig's model files and write them into Preferences.")
     p.add_argument("--family", action="append", choices=["klein", "minimax", "tools", *DESCRIBED],
                    help="Repeatable. Krea 2 needs no HF account; Klein is gated.")
-    p.add_argument("--all", action="store_true", help="Every family, including the helper models.")
+    p.add_argument("--all", action="store_true",
+                   help="Every family in the download catalog, including the helper models.")
     p.add_argument("--include-optional", action="store_true",
                    help="Also fetch the optional files (Krea 2 Turbo DiT ~13 GB, MiniMax ref2va DiT ~21 GB, "
                         "SDXL's separate VAE, Anima's Turbo LoRA).")
@@ -752,7 +754,7 @@ def main():
         except Exception:
             pass
 
-    families = ["krea2", "klein", "minimax", "tools"] if a.all else (a.family or [])
+    families = [*FAMILIES, "tools"] if a.all else (a.family or [])
     if not families:
         p.error("pick --family krea2|klein|tools (repeatable), or --all")
 

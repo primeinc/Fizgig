@@ -54,6 +54,44 @@ def test_zimage_then_klein_klein_moves_to_a_flux2_file(tmp_path):
     assert prefs == {"vae": "", "zimage_vae": ae}
 
 
+def test_adapter_keeps_model_file_signature():
+    from fizgig.families.description import ModelFile
+    signature = ("decoder.conv_in.weight", (512, 16, 3, 3))
+    f = ModelFile("demo_vae", "VAE", repo="owner/repo", path="vae/ae.safetensors", size_gb=0.3, signature=signature)
+    assert fm._weight_from_file(f).signature == signature
+
+
+def test_every_catalog_weight_keeps_its_model_file_signature():
+    """Each downloadable file a family describes with a signature carries it into the catalog the downloader and
+    discovery use."""
+    from fizgig.families.registry import FAMILIES as descriptions
+    signed = {f.pref_key: tuple(f.signature) for key, d in descriptions.items() if key in fm.FAMILIES
+              for f in d.model_files if f.signature and f.repo and f.path}
+    assert signed
+    weights = {w.pref_key: w for w in fm.discovery_candidates()}
+    assert {key: tuple(weights[key].signature) for key in signed if key in weights} == signed
+
+
+def test_all_fetches_every_catalog_family_and_the_helpers(monkeypatch):
+    """--all is every family the catalog declares, read when it runs: a family added to it is included."""
+    import sys
+    import pytest
+    asked = {}
+
+    def fetch(families, **_):
+        asked["families"] = families
+        return True
+
+    monkeypatch.setattr(fm, "FAMILIES", {**fm.FAMILIES, "future_family": []})
+    monkeypatch.setattr(fm, "fetch", fetch)
+    monkeypatch.setattr(sys, "argv", ["fetch_models", "--all", "--dry-run"])
+    with pytest.raises(SystemExit) as done:
+        fm.main()
+    assert done.value.code == 0
+    assert sorted(asked["families"]) == sorted([*fm.FAMILIES, "tools"])
+    assert "future_family" in asked["families"]
+
+
 def test_files_it_cannot_tell_apart_are_left_alone(tmp_path):
     """A file without the tensor (another format), an unreadable one, or the right one: no change."""
     other = tmp_path / "diffusers_vae.safetensors"

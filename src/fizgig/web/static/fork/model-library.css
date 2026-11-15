@@ -38,6 +38,8 @@
 .mp-chip.stale { background: color-mix(in srgb, var(--warning) 10%, var(--bg-surface)); color: var(--warning-text);
   border-color: color-mix(in srgb, var(--warning) 40%, var(--border)); }
 .mp-chip.missing { color: var(--text-muted); }
+.mp-chip.wrong { background: color-mix(in srgb, var(--danger, var(--warning)) 10%, var(--bg-surface));
+  color: var(--danger-text, var(--warning-text)); }
 .mp-chip.optional { border-style: dashed; }
 .mp-library-card { border-radius: 10px; overflow: visible; padding: 0 0 12px !important; }
 .mp-library-caption { padding: 16px 0 13px; display: flex; flex-wrap: wrap; justify-content: space-between;

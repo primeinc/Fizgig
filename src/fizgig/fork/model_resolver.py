@@ -25,12 +25,21 @@ def configured_file(value, repo_dir):
     path = raw if os.path.isabs(raw) else os.path.join(repo_dir, raw)
     return os.path.abspath(path) if os.path.isfile(path) else ""
 
+def found_file_check(w, core):
+    """The test a discovered file passes to be linked for `w`: a plausible .safetensors file whose header does not
+    prove it holds another model's weights (ModelFile.signature, fetch_models.is_other_file)."""
+    signature = getattr(w, "signature", ())
+    return lambda path, min_bytes: (core._valid_safetensors(path, min_bytes)
+                                    and not core.is_other_file(path, signature))
+
+
 def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alternates=False, *, core):
     """Resolve without downloading or mutating prefs, honouring existing explicit selections.
 
     The fork's explicit-path policy takes precedence over upstream switch_from/replaces
     hints. A valid configured file stays selected until the user clears the row.
-    Discovery can find alternate builds only when a model is otherwise unresolved.
+    Discovery can find alternate builds only when a model is otherwise unresolved, and
+    never links a file whose header shows it is another model's.
     """
     current = core._configured_file(prefs.get(w.pref_key), repo_dir)
     if current:
@@ -40,8 +49,9 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alte
     if core._configured_file(other, repo_dir):
         return core._configured_file(other, repo_dir)
     min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+    valid = found_file_check(w, core)
     found = core.model_sources.resolve_weight(w, prefs.get("model_search_roots", []), models_dir,
-                                         core._valid_safetensors, min_bytes, cache=scan_cache)
+                                         valid, min_bytes, cache=scan_cache)
     if found is core.model_sources.AMBIGUOUS or found:
         return found
     # Search Locally can reuse an advertised alternative build even if the
@@ -50,7 +60,7 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alte
     if allow_alternates and getattr(w, "alt", None):
         alt = w.alt
         alt_found = core.model_sources.resolve_weight(alt, prefs.get("model_search_roots", []), models_dir,
-                          core._valid_safetensors, int(alt.gb * 0.8 * 1024 ** 3), cache=scan_cache)
+                          found_file_check(alt, core), int(alt.gb * 0.8 * 1024 ** 3), cache=scan_cache)
         if alt_found is core.model_sources.AMBIGUOUS or alt_found:
             return alt_found
     # The chosen output library is also a source, but user roots and the HF cache
@@ -59,6 +69,6 @@ def find_weight(w, models_dir, prefs, scan_cache=None, repo_dir=None, allow_alte
         _download_parent, saved_path = core.model_destinations.destination(w, models_dir, prefs)
     except ValueError:
         return None
-    if os.path.isfile(saved_path) and core._valid_safetensors(saved_path, min_bytes):
+    if os.path.isfile(saved_path) and valid(saved_path, min_bytes):
         return saved_path
     return None

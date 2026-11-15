@@ -15,8 +15,8 @@ function mpModels(f) {
     {pref_key: key, label: key, note: "Model used by this training family.", required: false}]);
 }
 function mpStat(key) {
-  return S.modelInventory?.files?.[key] || {exists: false, bytes: 0, expected_bytes: 0,
-    configured: !!S.prefs[key], required: false};
+  return S.modelInventory?.files?.[key] || {exists: false, ready: false, wrong_file: false, bytes: 0,
+    expected_bytes: 0, configured: !!S.prefs[key], required: false};
 }
 function mpHelp(description, model = null) {
   const content = el("div", {class: "mp-help-content"},
@@ -44,7 +44,8 @@ async function mpRefresh() {
 }
 function mpRow(f, key, m) {
   const st = mpStat(key), raw = String(S.prefs[key] || "");
-  const state = st.exists ? "ready" : raw.trim() ? "stale" : "missing";
+  // Ready is the server's identity verdict (model_inventory): existence alone is not enough.
+  const state = st.ready ? "ready" : st.wrong_file ? "wrong" : raw.trim() ? "stale" : "missing";
   const label = m.label || key;
   const input = el("input", {type: "text", class: "w-path mp-path-input", value: raw,
     "aria-label": label + " model path", title: raw || "No model path selected",
@@ -67,7 +68,7 @@ function mpRow(f, key, m) {
   };
   input.addEventListener("input", () => { clear.disabled = !input.value.trim(); });
   input.addEventListener("change", () => savePath(input.value));
-  const statusName = st.exists ? "Ready" : state === "stale" ? "Missing file" : "Not selected";
+  const statusName = {ready: "Ready", wrong: "Wrong file", stale: "Missing file"}[state] || "Not selected";
   const status = mpChip(statusName, state);
   const role = MP_ROLES[m.role] || "Model";
   const progress = el("span", {class: "mp-row-progress", role: "status", hidden: true});
@@ -79,12 +80,13 @@ function mpRow(f, key, m) {
     el("div", {class: "mp-model-name"}, el("b", {text: label}), mpHelp(sourceInfo, m)),
     el("div", {class: "mp-model-badges"}, status, mpChip(role),
       ...(!m.required ? [mpChip("Optional", "optional")] : [])));
-  const diskSize = st.exists ?
+  const diskSize = state === "ready" ?
     (st.directory ? "Model folder ready · size unmeasured" : mpSize(st.bytes) + " on disk") :
+    state === "wrong" ? "This file holds another model's weights" :
     state === "stale" ? "Saved path no longer exists" : "No local model selected";
   const catalogSize = m.size_gb ? "Catalog estimate " + Number(m.size_gb).toFixed(2) + " GB" : "";
   const meta = el("div", {class: "mp-model-meta"},
-    el("span", {class: st.exists ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
+    el("span", {class: state === "ready" ? "mp-size-ready" : "mp-size-missing", text: diskSize}),
     ...(catalogSize ? [el("span", {text: catalogSize})] : []), progress, message);
   const actions = el("div", {class: "mp-model-actions"},
     el("button", {class: "btn btn-sm", text: "Choose…", title: "Choose a local model file", onclick: () =>
@@ -110,17 +112,17 @@ function mpOptionalPanel(f) {
 }
 function mpFamilySummary(f) {
   const entries = mpModels(f);
-  const ready = entries.filter(([key]) => mpStat(key).exists).length;
-  const folders = entries.filter(([key]) => mpStat(key).exists && mpStat(key).directory).length;
+  const ready = entries.filter(([key]) => mpStat(key).ready).length;
+  const folders = entries.filter(([key]) => mpStat(key).ready && mpStat(key).directory).length;
   const seen = new Set();
   let disk = 0, remaining = 0;
   for (const [key,m] of entries) {
     const st = mpStat(key), same = m.same_as || key;
-    if (st.exists) {
+    if (st.ready) {
       if (!st.directory && st.path && !seen.has(st.path.toLowerCase())) {
         seen.add(st.path.toLowerCase()); disk += st.bytes || 0;
       }
-    } else if (m.required && !mpStat(same).exists && !seen.has("missing:" + same)) {
+    } else if (m.required && !mpStat(same).ready && !seen.has("missing:" + same)) {
       seen.add("missing:" + same); remaining += st.expected_bytes || 0;
     }
   }

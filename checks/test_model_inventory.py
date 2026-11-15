@@ -1,12 +1,56 @@
 """Status/size provenance for the compact Preferences model-path workspace."""
+import json
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 
 from fizgig.web.model_inventory import GIB, inventory
 
+FLUX2_VAE = [512, 32, 3, 3]
+FLUX1_VAE = [512, 16, 3, 3]
 
-def file(key, size_gb=1.0, required=True, same_as=""):
-    return SimpleNamespace(pref_key=key, size_gb=size_gb, required=required, same_as=same_as)
+
+def file(key, size_gb=1.0, required=True, same_as="", signature=()):
+    return SimpleNamespace(pref_key=key, size_gb=size_gb, required=required, same_as=same_as, signature=signature)
+
+
+def vae(path, shape):
+    """A .safetensors file whose header holds only a VAE's decoder.conv_in.weight at `shape`."""
+    header = json.dumps({"decoder.conv_in.weight": {"dtype": "F16", "shape": shape, "data_offsets": [0, 2]}}).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+    return path
+
+
+def test_same_name_file_holding_another_models_tensor_is_not_ready(tmp_path):
+    wrong = vae(tmp_path / "models" / "ae.safetensors", FLUX2_VAE)
+    model = file("zimage_vae", 0.34, signature=("decoder.conv_in.weight", tuple(FLUX1_VAE)))
+    result = inventory({"zimage_vae": str(wrong)}, [family(model)], str(tmp_path))
+    item, summary = result["files"]["zimage_vae"], result["summary"]
+    assert item["exists"] and item["wrong_file"] and not item["ready"]
+    assert (summary["found"], summary["wrong"], summary["missing"], summary["stale"]) == (0, 1, 0, 0)
+    assert summary["disk_bytes"] == 0
+    assert summary["remaining_required_bytes"] == round(0.34 * GIB)
+
+
+def test_file_its_signature_describes_is_ready(tmp_path):
+    right = vae(tmp_path / "models" / "ae.safetensors", FLUX1_VAE)
+    model = file("zimage_vae", 0.34, signature=("decoder.conv_in.weight", tuple(FLUX1_VAE)))
+    result = inventory({"zimage_vae": str(right)}, [family(model)], str(tmp_path))
+    item, summary = result["files"]["zimage_vae"], result["summary"]
+    assert item["ready"] and not item["wrong_file"]
+    assert (summary["found"], summary["wrong"]) == (1, 0)
+    assert summary["remaining_required_bytes"] == 0
+
+
+def test_file_without_the_signature_tensor_is_not_called_wrong(tmp_path):
+    other_format = tmp_path / "models" / "diffusers_vae.safetensors"
+    header = json.dumps({"something.else": {"dtype": "F16", "shape": [1], "data_offsets": [0, 2]}}).encode()
+    other_format.parent.mkdir(parents=True)
+    other_format.write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+    model = file("zimage_vae", 0.34, signature=("decoder.conv_in.weight", tuple(FLUX1_VAE)))
+    item = inventory({"zimage_vae": str(other_format)}, [family(model)], str(tmp_path))["files"]["zimage_vae"]
+    assert item["ready"] and not item["wrong_file"]
 
 
 def family(*models):

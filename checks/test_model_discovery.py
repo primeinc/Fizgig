@@ -40,6 +40,21 @@ def resolve(w, roots, own):
     return model_sources.resolve_weight(w, roots, own, fetch_models._valid_safetensors, 819)
 
 
+def test_discovery_never_links_a_file_its_signature_proves_is_another_model(tmp_path):
+    w = weight(name="ae.safetensors", pref="demo_vae", path="vae/ae.safetensors")
+    found = safetensor(tmp_path / "ComfyUI" / "models" / "vae" / w.filename)       # its tensor is [512]
+    own = safetensor(tmp_path / "downloads" / w.filename)
+    prefs = {"model_search_roots": [str(tmp_path / "ComfyUI")]}
+    w.signature = ("tensor", (256,))
+    assert fetch_models.find_weight(w, str(tmp_path / "downloads"), prefs) is None
+    w.signature = ("tensor", (512,))
+    assert fetch_models.find_weight(w, str(tmp_path / "downloads"), prefs) == str(found)
+    prefs = {}
+    assert fetch_models.find_weight(w, str(tmp_path / "downloads"), prefs) == str(own)
+    w.signature = ("tensor", (256,))
+    assert fetch_models.find_weight(w, str(tmp_path / "downloads"), prefs) is None
+
+
 def test_explicit_community_choice_is_never_replaced(tmp_path):
     w = weight(gated=True)
     custom = tmp_path / "personal.safetensors"

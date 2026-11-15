@@ -122,3 +122,54 @@ def test_remote_branch_is_reused_not_rewritten(repos, tmp_path):
     assert existing["status"] == "existing_remote"
     assert existing["branch"] == prepared["branch"]
     assert git(fork, "symbolic-ref", "--short", "HEAD") == "master"
+
+
+def published_then_master_moves(upstream, fork, tmp_path, filename, body):
+    """Publish a prepared sync branch, then commit `filename` to master after it."""
+    published = tmp_path / "published.git"
+    git(tmp_path, "init", "--bare", str(published))
+    git(fork, "remote", "set-url", "origin", str(published))
+    write(upstream, "upstream_only.py", "UPSTREAM=True\n")
+    result, prepared = sync(upstream, fork)
+    assert result.returncode == 0, result.stderr
+    assert prepared["status"] == "prepared"
+    git(fork, "push", "origin", f"HEAD:refs/heads/{prepared['branch']}")
+    git(fork, "switch", "master")
+    git(fork, "branch", "-D", prepared["branch"])
+    write(fork, filename, body)
+    return published, prepared
+
+
+def test_published_branch_behind_master_is_brought_up_to_date_not_published_stale(repos, tmp_path):
+    upstream, fork = repos
+    published, prepared = published_then_master_moves(upstream, fork, tmp_path, "fork_later.py", "LATER=True\n")
+    master = git(fork, "rev-parse", "master")
+    result, refreshed = sync(upstream, fork)
+    assert result.returncode == 0, result.stderr
+    assert refreshed["status"] == "prepared"
+    assert refreshed["branch"] == prepared["branch"]
+    assert refreshed["base_sha"] == master
+    assert refreshed["previous_sha"] == prepared["merge_sha"]
+    head = refreshed["merge_sha"]
+    assert git(fork, "rev-parse", "HEAD") == head
+    # current master, the upstream commit and the published tip are all in it: pushing it is a fast-forward
+    for ancestor in (master, refreshed["upstream_sha"], prepared["merge_sha"]):
+        git(fork, "merge-base", "--is-ancestor", ancestor, head)
+    assert git(fork, "show", f"{head}:fork_later.py") == "LATER=True"
+    assert git(fork, "show", f"{head}:upstream_only.py") == "UPSTREAM=True"
+    assert git(fork, "rev-parse", "master") == master
+    assert git(published, "rev-parse", f"refs/heads/{prepared['branch']}") == prepared["merge_sha"]
+
+
+def test_published_branch_that_cannot_take_master_is_a_conflict_left_unpublished(repos, tmp_path):
+    upstream, fork = repos
+    published, prepared = published_then_master_moves(upstream, fork, tmp_path, "upstream_only.py", "FORK=True\n")
+    master = git(fork, "rev-parse", "master")
+    result, data = sync(upstream, fork)
+    assert result.returncode == 2, result.stderr
+    assert data["status"] == "conflict"
+    assert data["conflicts"] == "upstream_only.py"
+    assert git(fork, "symbolic-ref", "--short", "HEAD") == "master"
+    assert git(fork, "rev-parse", "master") == master
+    assert git(fork, "status", "--porcelain") == ""
+    assert git(published, "rev-parse", f"refs/heads/{prepared['branch']}") == prepared["merge_sha"]

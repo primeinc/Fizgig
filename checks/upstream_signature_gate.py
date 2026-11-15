@@ -14,7 +14,8 @@ import sys
 
 
 def git(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], text=True, capture_output=True, check=False)
+    # Sources are UTF-8 whatever the platform's locale code page is.
+    return subprocess.run(["git", *args], text=True, encoding="utf-8", capture_output=True, check=False)
 
 
 def callables(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
@@ -32,6 +33,62 @@ def callables(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
     return result
 
 
+def optional_positions(args: ast.arguments) -> set[int]:
+    """Indexes of the positional parameters that have a default (defaults fill the last ones)."""
+    count = len(args.posonlyargs) + len(args.args)
+    return set(range(count - len(args.defaults), count))
+
+
+def call_breaks(a: ast.arguments, b: ast.arguments) -> list[str]:
+    """How a call that binds to upstream parameters `a` fails, or binds otherwise, against fork parameters `b`."""
+    problems = []
+    a_pos = [*a.posonlyargs, *a.args]
+    b_pos = [*b.posonlyargs, *b.args]
+    a_opt, b_opt = optional_positions(a), optional_positions(b)
+    b_by_keyword = {x.arg for x in b.args + b.kwonlyargs}
+    b_kw_optional = {x.arg for x, default in zip(b.kwonlyargs, b.kw_defaults) if default is not None}
+
+    # Each upstream positional slot still takes an argument by position, the same parameter, as optional as before.
+    for i, p in enumerate(a_pos):
+        if i >= len(b_pos):
+            if b.vararg is None:
+                problems.append(f"upstream positional parameter {i + 1} ({p.arg}) no longer accepted by position")
+            continue
+        q = b_pos[i]
+        if i >= len(a.posonlyargs) and q.arg != p.arg:
+            problems.append(f"upstream positional parameter {i + 1} ({p.arg}) is now {q.arg}")
+        elif i in a_opt and i not in b_opt:
+            problems.append(f"upstream optional parameter made required: {p.arg}")
+
+    # Each upstream keyword is still taken by keyword, unless the fork takes **kwargs.
+    if b.kwarg is None:
+        for lost in sorted({x.arg for x in a.args + a.kwonlyargs} - b_by_keyword):
+            problems.append(f"upstream keyword parameter lost: {lost}")
+
+    # An upstream optional keyword-only parameter the fork still names stays optional.
+    for x, default in zip(a.kwonlyargs, a.kw_defaults):
+        if default is None or x.arg not in b_by_keyword:
+            continue
+        at = next((j for j, q in enumerate(b_pos) if q.arg == x.arg), None)
+        if x.arg not in b_kw_optional and (at is None or at not in b_opt):
+            problems.append(f"upstream optional parameter made required: {x.arg}")
+
+    if a.vararg is not None and b.vararg is None:
+        problems.append("upstream *args removed")
+    if a.kwarg is not None and b.kwarg is None:
+        problems.append("upstream **kwargs removed")
+
+    # A parameter the fork requires that upstream never had fails every upstream call.
+    a_names = {x.arg for x in a_pos + a.kwonlyargs}
+    for j, q in enumerate(b_pos):
+        if j >= len(a_pos) and j not in b_opt and q.arg not in a_names:
+            problems.append(f"fork adds required parameter: {q.arg}")
+    for x, default in zip(b.kwonlyargs, b.kw_defaults):
+        if default is None and x.arg not in a_names:
+            problems.append(f"fork adds required parameter: {x.arg}")
+    return problems
+
+
 def signature_violations(upstream_source: str, fork_source: str) -> list[str]:
     upstream = callables(upstream_source)
     fork = callables(fork_source)
@@ -41,14 +98,7 @@ def signature_violations(upstream_source: str, fork_source: str) -> list[str]:
         if adapted is None:
             errors.append(f"{name}: upstream callable missing from fork")
             continue
-        a, b = original.args, adapted.args
-        if b.kwarg is None:
-            original_keywords = {x.arg for x in a.args + a.kwonlyargs}
-            adapted_keywords = {x.arg for x in b.args + b.kwonlyargs}
-            for lost in sorted(original_keywords - adapted_keywords):
-                errors.append(f"{name}: upstream keyword parameter lost: {lost}")
-        if b.vararg is None and len(b.posonlyargs) < len(a.posonlyargs):
-            errors.append(f"{name}: upstream positional-only arity reduced")
+        errors.extend(f"{name}: {problem}" for problem in call_breaks(original.args, adapted.args))
     return errors
 
 
