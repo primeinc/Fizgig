@@ -99,3 +99,26 @@ def test_ambiguous_web_scan_does_not_write_pref(web_search):
     assert status["state"] == "done"
     assert status["ambiguous"] == 1
     assert w.pref_key not in json.loads(prefs_file.read_text())
+
+
+@pytest.mark.parametrize("upstream_hint", ["replaces", "switch_from"])
+def test_retired_but_explicit_model_path_remains_kept(web_search, upstream_hint):
+    """A filename replacement hint is not permission to replace a user's valid path."""
+    root, prefs_file, w = web_search
+    manual = root / "previous-model.safetensors"
+    manual.write_bytes(b"explicit user-selected model")
+    before = json.loads(prefs_file.read_text())
+    before[w.pref_key] = str(manual)
+    prefs_file.write_text(json.dumps(before))
+    if upstream_hint == "replaces":
+        w.replaces = ("previous-model.safetensors",)
+    else:
+        w.switch_from = "previous-model.safetensors"
+    tiny_file(root / w.filename)
+
+    server._start_model_search("demo")
+    status = server._model_search_status()
+    assert status["kept"] == 1
+    assert status["found"] == 0
+    assert json.loads(prefs_file.read_text())[w.pref_key] == str(manual)
+    assert manual.read_bytes() == b"explicit user-selected model"
