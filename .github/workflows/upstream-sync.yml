@@ -1,0 +1,109 @@
+name: Upstream compatibility sync
+
+on:
+  schedule:
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/upstream-sync.yml"
+      - ".github/workflows/checks.yml"
+      - "scripts/upstream_sync.py"
+      - "checks/test_upstream_sync.py"
+  pull_request:
+    paths:
+      - ".github/workflows/upstream-sync.yml"
+      - "scripts/upstream_sync.py"
+      - "checks/test_upstream_sync.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fizgig-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  verify-sync-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify real Git merge/conflict/idempotence behavior
+        run: python -m pip install pytest && python -m pytest checks/test_upstream_sync.py -q
+
+  prepare-sync:
+    if: github.event_name != 'pull_request'
+    needs: verify-sync-engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Prepare reviewed upstream merge in a new branch, never master
+        id: plan
+        run: |
+          python scripts/upstream_sync.py \
+            --upstream https://github.com/shootthesound/Fizgig.git \
+            --preserve src/fizgig/fork/model_resolver.py \
+            --preserve src/fizgig/web/static/fork/model-library.js \
+            --preserve src/fizgig/web/static/fork/caption-rules.js
+      - name: Install canonical CPU test dependencies
+        if: steps.plan.outputs.status == 'prepared'
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r checks/requirements.txt
+      - name: Compile, recursively parse web JS, and run the full fork suite
+        if: steps.plan.outputs.status == 'prepared'
+        run: |
+          python -m compileall -q src
+          python checks/js_parse_gate.py
+          python -m pytest checks -q
+      - name: Publish successful sync branch, open review PR and dispatch independent CI
+        if: steps.plan.outputs.status == 'prepared' || steps.plan.outputs.status == 'existing_remote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_BRANCH: ${{ steps.plan.outputs.branch }}
+          UPSTREAM_SHA: ${{ steps.plan.outputs.upstream_sha }}
+          BASE_SHA: ${{ steps.plan.outputs.base_sha }}
+          SYNC_STATUS: ${{ steps.plan.outputs.status }}
+        run: |
+          if [ "$SYNC_STATUS" = "prepared" ]; then
+            git fetch --no-tags origin master
+            if [ "$(git rev-parse FETCH_HEAD)" != "$BASE_SHA" ]; then
+              echo "master advanced while preparing sync; refusing to publish a stale base" >&2
+              exit 1
+            fi
+            git push origin "HEAD:refs/heads/$SYNC_BRANCH"
+          fi
+          if [ "$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq 'length')" = "0" ]; then
+            gh pr create --base master --head "$SYNC_BRANCH" \
+              --title "Sync upstream Fizgig ${UPSTREAM_SHA:0:12}" \
+              --body "Prepared from canonical shootthesound/Fizgig at $UPSTREAM_SHA. For a new branch, complete fork CPU checks and recursive JavaScript parsing passed before publication. Existing remote branches are not regenerated. No automated merge to master. Review the actual diff, especially training, helpers, and fork-only model and caption behavior."
+          fi
+          # GITHUB_TOKEN-created PRs can require approval for ordinary PR CI.
+          # workflow_dispatch explicitly triggers the independent canonical gate.
+          gh workflow run checks.yml --ref "$SYNC_BRANCH"
+          echo "Prepared sync $SYNC_BRANCH from $UPSTREAM_SHA; independent checks dispatched." >> "$GITHUB_STEP_SUMMARY"
+      - name: Report failed or conflicting upstream integration
+        if: failure()
+        run: |
+          echo "Upstream integration blocked. No untested changes were published to master." >> "$GITHUB_STEP_SUMMARY"
+          echo "Inspect the preceding prepare, merge, authorization and test output." >> "$GITHUB_STEP_SUMMARY"
