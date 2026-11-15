@@ -1159,6 +1159,7 @@ def train_family(family, dit_path, dataset_config, output_dir, output_name, *, n
                  lr_scheduler="constant", lr_warmup_steps=0, lr_scheduler_num_cycles=1, lr_scheduler_power=1.0,
                  gradient_accumulation_steps=1, compile_blocks="auto", gradient_checkpointing="auto", blocks_to_swap=0, network_type="lora", lokr_factor=8,
                  log_per_image_loss=False, per_image_lr=False, auto_recaption=False, warmup_look_outliers=False,
+                 training_maps=False, training_maps_images=3,
                  trigger_word=None, trigger_position="start", recaption_triggers=None, recaption_replace_rules="",
                  recaption_instruction=None,
                  recaption_instruction_detailed=None, recaption_task=None, recaption_task_detailed=None,
