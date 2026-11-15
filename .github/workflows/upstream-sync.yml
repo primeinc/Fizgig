@@ -99,7 +99,7 @@ jobs:
           if [ "$(gh pr list --state open --head "$SYNC_BRANCH" --json number --jq 'length')" = "0" ]; then
             gh pr create --base master --head "$SYNC_BRANCH" \
               --title "Sync upstream Fizgig ${UPSTREAM_SHA:0:12}" \
-              --body "Prepared from canonical shootthesound/Fizgig at $UPSTREAM_SHA. For a new branch, complete fork CPU checks and recursive JavaScript parsing passed before publication. Existing remote branches are not regenerated. No automated merge to master. Review the actual diff, especially training, helpers, and fork-only model and caption behavior."
+              --body "Prepared from canonical shootthesound/Fizgig at $UPSTREAM_SHA. Complete fork CPU checks and recursive JavaScript parsing passed before publication. A published branch whose base fell behind master gets master merged in and is pushed as a fast-forward, never force-pushed. No automated merge to master. Review the actual diff, especially training, helpers, and fork-only model and caption behavior."
           fi
           # GITHUB_TOKEN-created PRs can require approval for ordinary PR CI.
           # workflow_dispatch explicitly triggers the independent canonical gate.
