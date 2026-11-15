@@ -45,9 +45,10 @@ def start(family="", choices=None, *, core):
                     status, path = "ambiguous", ""
                 elif not result:
                     status, path = "missing", ""
-                elif current and os.path.isfile(core.pref_path(prefs, w.pref_key)) and not (
-                        w.switch_from and os.path.basename(current) == w.switch_from) and (
-                        os.path.basename(current) not in w.replaces):
+                elif current and os.path.isfile(core.pref_path(prefs, w.pref_key)):
+                    # A configured, existing file is a user choice even if upstream marks
+                    # its basename replaced or the build selector advertises an alternate.
+                    # The user must clear the row to authorize a different download.
                     status, path = "kept", current
                 else:
                     status, path = "found", os.path.abspath(result)
