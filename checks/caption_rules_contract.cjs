@@ -70,6 +70,7 @@ const ctx={
 };
 vm.createContext(ctx);
 vm.runInContext(source,ctx,{timeout:10000});
+(async () => {
 const extension=ctx.window.FizgigForkCaptionRules;
 assert(extension && Object.isFrozen(extension));
 extension.wire();
@@ -115,3 +116,4 @@ assert($("capRulesStatus").textContent.includes("Rules not saved"));
 assert.equal(storage.get("/dataset/A").enabled,true, "Failed write cannot change server state");
 
 console.log("PASS: caption rules load, save, preview, folder isolation, failing-save gate");
+})().catch(e => { console.error(e); process.exitCode=1; });
