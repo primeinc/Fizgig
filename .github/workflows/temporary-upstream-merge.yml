@@ -33,6 +33,7 @@ jobs:
           git merge --no-ff -X ours --no-edit -m "Merge shootthesound/Fizgig at b3a892f6 into primeinc/Fizgig" FETCH_HEAD
           test -z "$(git ls-files --unmerged)"
           git show -s --pretty="merge %H%nparents %P" HEAD
+          git push origin HEAD:refs/heads/sync/upstream-2026-11-15
       - name: Python sources compile
         run: python -m compileall -q src
       - name: JavaScript sources parse
