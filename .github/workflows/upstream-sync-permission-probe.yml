@@ -1,0 +1,52 @@
+name: Verify upstream sync PR publication permissions
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/upstream-sync-permission-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  publish-and-cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+      - name: Verify GITHUB_TOKEN can publish a PR and remove all temporary branch data
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="probe/upstream-sync-token-${GITHUB_RUN_ID}"
+          pr_url=""
+          cleanup() {
+            if [ -n "$pr_url" ]; then
+              gh pr close "$pr_url" --comment "Automated permission probe complete; no production changes." || true
+            fi
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+              git push origin --delete "$branch" || true
+            fi
+          }
+          trap cleanup EXIT
+          git config user.name "Fizgig PR Permission Probe"
+          git config user.email "upstream-sync@users.noreply.github.com"
+          git switch -c "$branch"
+          printf 'Temporary test for GitHub Actions PR creation permission: %s\n' "$GITHUB_RUN_ID" > .upstream-sync-permission-probe
+          git add .upstream-sync-permission-probe
+          git commit -m "test: temporary PR publication permission probe [skip ci]"
+          git push origin "HEAD:refs/heads/$branch"
+          pr_url="$(gh pr create --base master --head "$branch" --draft \
+            --title "Temporary upstream-sync GITHUB_TOKEN permission probe" \
+            --body "Ephemeral authorization test. This PR is automatically closed and its branch deleted by the running GitHub Actions job.")"
+          gh pr close "$pr_url" --comment "Permission verified. No production changes were merged."
+          pr_url=""
+          echo "GITHUB_TOKEN created and closed a real disposable pull request; no production files changed." >> "$GITHUB_STEP_SUMMARY"
