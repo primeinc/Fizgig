@@ -24,7 +24,38 @@ _PDD_SIGMAS = (1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.532773911952
 # framing (AdaFace ViT 0.689, above all but 2 of her 45 photos) and kept the backgrounds clean. The boxes hold these
 # numbers behind the row's Advanced toggle; minimax_image/driver.py's defaults are the same.
 LIKENESS_DEFAULTS = {"BEFORE": "16.67", "BEFORE_END": "50", "HINGE": "6", "SLIDE": "0", "AFTER": "75",
-                     "ALTERNATE": "Before the hinge"}
+                     "ALTERNATE": "The first share"}
+# the sampler (Samples tab, and Studio's own pick): LCM from a community text-to-image recipe (r/StableDiffusion,
+# 15 Nov 2026), Peter's pick over Euler on the same seeds ("much better", 15 Nov 2026). The ⓘ says how to match it in
+# ComfyUI
+_SAMPLER_EXPLAIN = (
+    "LCM takes the model's clean picture at every step and adds fresh noise back, a little more than usual at the "
+    "start (1.1) and a little less by the end (0.9). On text-to-image it gives smoother, more natural skin and less "
+    "of the crunchy, over-sharpened look than Euler. It adds new noise at each step, so the same seed gives a "
+    "different picture from Euler, not just a different finish.\n\n"
+    "To render the same way in ComfyUI, LCM: SamplerCustomAdvanced, with SamplerLCM (s_noise 1.1, s_noise_end 0.9, "
+    "noise_clip_std 0), BasicScheduler (simple, 6 steps, denoise 1.0), CFGGuider (cfg 1.0) and RandomNoise for the "
+    "seed. Without SamplerLCM's s_noise_end, a KSampler on lcm, simple, 6 steps, CFG 1.0 comes close, a little "
+    "softer.\n\n"
+    "Euler: a KSampler on euler, simple, 6 steps, CFG 1.0 - ComfyUI's own MiniMax H3 Image template.\n\n"
+    "Larger pictures help too: the model was made for about 16 MP (e.g. 3552 x 4736), and long prompts that describe "
+    "the photo (camera, light, skin) do better than short ones.")
+_SAMPLER_HINT = ("LCM (the default): smoother, more natural skin than Euler on text-to-image. Euler: the model's own "
+                 "sampler, as ComfyUI's template. The ⓘ gives the ComfyUI settings for each.")
+# the ⓘ beside Likeness optimization (Peter, 15 Nov 2026: help text, the schedule itself stays as it is)
+_LIKENESS_EXPLAIN = (
+    "H3 Image draws each training step at one of its 6 noise levels. The clean-end share is how many steps go to the "
+    "last one, the nearly finished picture, where skin, eyes and fine detail are made. The model's own share is 1 in "
+    "6 (about 17%). A higher share learns likeness faster; the other levels learn pose, layout and the shape of "
+    "things.\n\n"
+    "The schedule reads like MOSS-Image's Clean-end share Slide: the First share until the Until epoch (Rising to, if "
+    "set, makes it climb evenly to that figure by then), then it slides over that many epochs to the Second share "
+    "(0 jumps straight across), which holds from then on. Alternate makes one share switch with the other every "
+    "epoch, starting with its own.\n\n"
+    "The defaults: 17% rising to 50% until epoch 6, alternating with 75%, so epochs 1, 3 and 5 at 17%, 33% and 50% "
+    "and epochs 2, 4 and 6 at 75%; from epoch 7, 75% every epoch.\n\n"
+    "H3 Image learns fast. If hands, faces or bodies come out broken, try an earlier epoch before you change "
+    "these numbers: a late epoch has usually gone past its best.")
 
 
 def _preset(rank, epochs=30, slider=False, mp="0.25", edit=False, likeness=False, optimizer="automagic3", lr=2.8e-4):
@@ -218,7 +249,8 @@ MINIMAX_IMAGE = FamilyDescription(
     preview_negative=None,
     preview_width=2048,               # ComfyUI's MiniMaxH3ImageConditioning default; the low end of 4-20 MP
     preview_height=2048,
-    repair_size=1024,
+    preview_more_sizes=(3072, 4096),  # 9 and 16 MP for those with the memory (#348); 2048 stays the default
+    repair_size=1280,                 # Studio's starting size (Peter, 15 Nov 2026: higher than 1024)
     # Likeness optimization (H3 Image's own, in place of the Clean-end share box, Peter 11 Nov 2026): the share of
     # steps at the noise level below sigma 0.5 (0.232, the last of the 6) follows LIKENESS_DEFAULTS' schedule; the
     # rest spread evenly over the 5 above. Off = the model's own even draw, 1 in 6 (~17%).
@@ -228,35 +260,46 @@ MINIMAX_IMAGE = FamilyDescription(
                      hint="Weights training toward the last of the model's 6 steps, the nearly finished picture, "
                           "where skin, eyes and fine detail are made, changing over the run so the earlier steps "
                           "(pose, layout, the shape of things) keep up. Untick for H3 Image's own even share.",
-                     summary="likeness optimization"),
-        # its schedule (Peter, 12 Nov 2026): one share before the hinge, one after, and which side alternates (between
-        # the two shares, starting with its own). Inside the tick's row, behind its Advanced toggle (closed by default).
-        FamilyOption("MINIMAX_IMAGE_LIKENESS_BEFORE", "Before the hinge", kind="entry", tokens="likeness_before={}",
-                     default=LIKENESS_DEFAULTS["BEFORE"], width=6, suffix="% at the clean end, to the hinge",
+                     explain=_LIKENESS_EXPLAIN, summary="likeness optimization"),
+        # its schedule (Peter, 12 Nov 2026): a first clean-end share until an epoch, a second after it, and which
+        # share alternates (with the other, starting with its own). Inside the tick's row, behind its Advanced toggle
+        # (closed by default). Worded like MOSS-Image's Clean-end share Slide (15 Nov 2026, #348); the keys and
+        # tokens keep their old before / hinge / after names.
+        FamilyOption("MINIMAX_IMAGE_LIKENESS_BEFORE", "First share", kind="entry", tokens="likeness_before={}",
+                     default=LIKENESS_DEFAULTS["BEFORE"], width=6, suffix="% of steps at the clean end, to start",
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), advanced=True),
-        # Peter, 12 Nov 2026: the Before share can climb (e.g. the model's own 16.67 up to 50) - the structure-heavy
-        # start of a low first share, landing at the hinge like a 50 / 75 alternation
-        FamilyOption("MINIMAX_IMAGE_LIKENESS_BEFORE_END", "Rises to", kind="entry", tokens="likeness_before_end={}",
-                     default=LIKENESS_DEFAULTS["BEFORE_END"], width=6, suffix="% by the hinge (blank: no climb)",
+        # Peter, 12 Nov 2026: the first share can climb (e.g. the model's own 16.67 up to 50) - the structure-heavy
+        # start of a low first share, landing at the Until epoch like a 50 / 75 alternation
+        FamilyOption("MINIMAX_IMAGE_LIKENESS_BEFORE_END", "Rising to", kind="entry", tokens="likeness_before_end={}",
+                     default=LIKENESS_DEFAULTS["BEFORE_END"], width=6, suffix="% by the Until epoch (blank: no climb)",
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), advanced=True,
-                     hint="Climbs evenly from Before to this by the hinge (only Before's own epochs while alternating)."),
-        FamilyOption("MINIMAX_IMAGE_LIKENESS_HINGE", "Hinge epoch", kind="entry", tokens="likeness_hinge={}",
-                     default=LIKENESS_DEFAULTS["HINGE"], width=6, suffix="the last epoch of Before",
+                     hint="Climbs evenly from the first share to this by the Until epoch (only on the first share's "
+                          "own epochs while it alternates)."),
+        FamilyOption("MINIMAX_IMAGE_LIKENESS_HINGE", "Until epoch", kind="entry", tokens="likeness_hinge={}",
+                     default=LIKENESS_DEFAULTS["HINGE"], width=6, suffix="the last epoch of the first share",
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), advanced=True),
-        FamilyOption("MINIMAX_IMAGE_LIKENESS_SLIDE", "Slide over", kind="entry", tokens="likeness_slide={}",
-                     default=LIKENESS_DEFAULTS["SLIDE"], width=6, suffix="epochs from Before to After (0: a jump)",
+        FamilyOption("MINIMAX_IMAGE_LIKENESS_SLIDE", "Then slides over", kind="entry", tokens="likeness_slide={}",
+                     default=LIKENESS_DEFAULTS["SLIDE"], width=6, suffix="epochs to the second share (0: a jump)",
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), advanced=True,
-                     hint="Starts after the hinge; After's alternating, if picked, starts when it ends."),
-        FamilyOption("MINIMAX_IMAGE_LIKENESS_AFTER", "After the hinge", kind="entry", tokens="likeness_after={}",
-                     default=LIKENESS_DEFAULTS["AFTER"], width=6, suffix="% at the clean end, after the hinge",
+                     hint="Starts after the Until epoch; the second share's alternating, if picked, starts when it "
+                          "ends."),
+        FamilyOption("MINIMAX_IMAGE_LIKENESS_AFTER", "Second share", kind="entry", tokens="likeness_after={}",
+                     default=LIKENESS_DEFAULTS["AFTER"], width=6, suffix="% of steps at the clean end, from then on",
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), advanced=True),
         FamilyOption("MINIMAX_IMAGE_LIKENESS_ALTERNATE", "Alternate", choices=(       # the first is the default
-                         ("Before the hinge", "likeness_alternate=before"),
-                         ("After the hinge", "likeness_alternate=after"),
+                         ("The first share", "likeness_alternate=before"),
+                         ("The second share", "likeness_alternate=after"),
                          ("Off", "likeness_alternate=off")),
+                     choice_renamed=(("Before the hinge", "The first share"), ("After the hinge", "The second share")),
                      requires="MINIMAX_IMAGE_LIKENESS_OPT", pady=(4, 0), width=18, advanced=True,
-                     hint="That side switches between the two shares each epoch, starting with its own. Off: each "
-                          "side holds its own."),
+                     hint="That share switches with the other one every epoch, starting with its own. Off: each "
+                          "share holds."),
+        # the previews' sampler (Peter, 15 Nov 2026): here for training previews, and in Studio as its own pick
+        # (studio=True, prefs studio_opt_MINIMAX_IMAGE_SAMPLER) - the two are independent
+        FamilyOption("MINIMAX_IMAGE_SAMPLER", "Sampler", tab="samples", choices=(
+                         ("LCM, noise 1.1 → 0.9", "sampler=lcm"),
+                         ("Euler (the model's own)", "sampler=euler")),
+                     hint=_SAMPLER_HINT, explain=_SAMPLER_EXPLAIN, studio=True),
     ),
     workbench=("repair", "profiler", "extract", "royale"),
 

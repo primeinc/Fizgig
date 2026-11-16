@@ -5,6 +5,45 @@ _ARTICLE = "https://github.com/shootthesound/Fizgig/blob/master/docs/NEWS.md"
 
 NEWS = [
     {
+        "date": "15 Nov 2026",
+        "title": "Gizmo's crop box reworked, AMD fixes, and Automagic v4's real rate",
+        "body": (
+            "Gizmo's crop box drags from any corner, keeps a locked shape smoothly, reaches every edge of the frame "
+            "and can be moved, typed, placed and saved.\n\n"
+            "An AMD PC with built-in graphics now trains on its graphics card, and Krea 2 LoKR fits 16 GB AMD cards "
+            "better. Automagic v4 shows the rate it really moves the weights at, on the run card, the chart and the log."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#15-nov-2026-gizmos-crop-box-reworked-amd-fixes-and-automagic-v4s-real-rate"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.4"}],
+    },
+    {
+        "date": "15 Nov 2026",
+        "title": "Cleaner H3 Image pictures with LCM, and Stop for a paused run",
+        "body": (
+            "MiniMax H3 Image now renders with LCM by default, on the Samples tab and in Studio: much cleaner skin, "
+            "hands and faces on text-to-image, the epoch 0 previews included, in the same 6 steps. Euler is still "
+            "there, and the info button gives the ComfyUI settings for each.\n\n"
+            "H3 Image previews go up to 4096 px, and Studio starts at 1280. A paused run no longer holds the queue: "
+            "Stop paused run ends the pause, and Continue carries it on later."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#15-nov-2026-cleaner-h3-image-pictures-with-lcm-and-stop-for-a-paused-run"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.3"}],
+    },
+    {
+        "date": "15 Nov 2026",
+        "title": "A regularisation set for LoRAs, AMD fixes, and Gizmo prepares a whole folder",
+        "body": (
+            "Train a LoRA against a regularisation dataset from the Subjects card, for the cases that need it: in our "
+            "testing DOP and Fizgig LoRA Isolation still do better for most people.\n\n"
+            "Gizmo's Prepare a folder makes a whole folder of videos trainable in one go, into a new folder, with a "
+            "Longest clip choice for 16 GB cards, and clips with 48 kHz sound now train as they are. On AMD, Krea 2 "
+            "renders above 512 px and LoKR training are fixed, and the Linux installer works again. ACE-Step caches "
+            "long songs on 16 GB cards."
+        ),
+        "links": [{"text": "Read more", "href": _ARTICLE + "#15-nov-2026-a-regularisation-set-for-loras-amd-fixes-and-gizmo-prepares-a-whole-folder"},
+                  {"text": "Release notes", "href": "https://github.com/shootthesound/Fizgig/releases/tag/v9.7.2"}],
+    },
+    {
         "date": "14 Nov 2026",
         "title": "Every job keeps its own view",
         "body": (
